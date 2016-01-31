@@ -1,3 +1,8 @@
+ <!-- Generate NuGet package for .Net clients -->
+    <Message Text="Generate NuGet package for .Net" />
+    <Exec Command="&quot;$(SolutionRoot)\.nuget\nuget.exe&quot; pack &quot;$(SolutionRoot)\Source\Iit.Research.AceService\ACE.API.Proxy.Nuget\ACE.API.Proxy.Nuget.nuspec&quot; -Version $(Version) -BasePath &quot;$(SolutionRoot)\Bin\Client&quot; -OutputDirectory &quot;$(BinariesRoot)&quot; -Properties ReleaseNotes=&quot;&quot;"
+          IgnoreExitCode="false" />
+
 
 public class OrganizationPreferences
     {
