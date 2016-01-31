@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<package >
+  <metadata>
+    <id>ACE.API.Proxy.Nuget</id>
+    <version>0.0.0.0</version>
+    <title>Ace client API</title>
+    <authors>Marius Slyzius</authors>
+    <owners></owners>
+    <projectUrl>http://tfs2012portal/sites/DefaultCollection/Advanced%20Research/Shared%20Documents/Forms/AllItems.aspx</projectUrl>
+    <iconUrl>http://proget:81/resources/Images/layout/saxobank-logo.png</iconUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <description>Ace Client API. Managed client API for Ace service</description>
+    <tags>aCe, recommender</tags>
+    <!--releaseNotes>$ReleaseNotes$</releaseNotes-->
+    <copyright>Copyright Saxo Bank</copyright>
+    <frameworkAssemblies>
+      <frameworkAssembly assemblyName="System" targetFramework="Net40" />
+    </frameworkAssemblies>
+    <dependencies>
+      <dependency id="Trading.Public" version="2.0.68.0" />
+    </dependencies>
+  </metadata>
+  <files>
+    <file src="Iit.Research.Ace.Api.Proxy.Common.dll" target="lib\net40" />
+    <file src="Iit.Research.Ace.Api.Proxy.Common.pdb" target="lib\net40" />
+    <file src="Iit.Research.Ace.Api.Proxy.Recommender.dll" target="lib\net40" />
+    <file src="Iit.Research.Ace.Api.Proxy.Recommender.pdb" target="lib\net40" />
+    <file src="Iit.Research.Ace.Api.Proxy.Support.dll" target="lib\net40" />
+    <file src="Iit.Research.Ace.Api.Proxy.Support.pdb" target="lib\net40" />
+  </files>
+</package>
