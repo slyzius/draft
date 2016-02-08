@@ -1,81 +1,101 @@
- <!-- Generate NuGet package for .Net clients -->
-    <Message Text="Generate NuGet package for .Net" />
-    <Exec Command="&quot;$(SolutionRoot)\.nuget\nuget.exe&quot; pack &quot;$(SolutionRoot)\Source\Iit.Research.AceService\ACE.API.Proxy.Nuget\ACE.API.Proxy.Nuget.nuspec&quot; -Version $(Version) -BasePath &quot;$(SolutionRoot)\Bin\Client&quot; -OutputDirectory &quot;$(BinariesRoot)&quot; -Properties ReleaseNotes=&quot;&quot;"
-          IgnoreExitCode="false" />
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
 
-
-public class OrganizationPreferences
+namespace WindowsFormsApplication1
+{
+    
+    public class NaiveBayesian
     {
-        public Dictionary<Tuple<int, string>, double> _organizationTagLikelihood;
-        public void Initialize(Voucher[] vouchers)
+        FeatureManager _ftm;
+        Dictionary<string, int> _categCounts;
+        Dictionary<string, Dictionary<int,double>> _featureLikellihood;
+
+        Dictionary<int, double> _userPrior;
+        Dictionary<int, Dictionary<string, double>> _categUserLikellihood;
+        int _totalVouchers;
+
+
+        public void Initialize(Voucher[] inVouchers, FeatureManager ftm)
         {
-            _organizationTagLikelihood = vouchers.GroupBy(x => x.OrganizationId)
-               .SelectMany(x => x.GroupBy(y => y.TagName).Select(y => new Tuple<int, string, double>(x.Key, y.Key,((double)y.Count()) / x.Count())))
-               .ToDictionary(x=> new Tuple<int, string>(x.Item1,x.Item2), x=> x.Item3);
+            _ftm = ftm;
+
+            var vouchers = ftm.ReadUniqueVouchers(inVouchers);
+
+            _totalVouchers = vouchers.Length;
+
+            // feature per category likellihood
+            _categCounts = vouchers.GroupBy(x => x.TagName).ToDictionary(x => x.Key, x => x.Count());
+
+            _featureLikellihood = vouchers.GroupBy(g => g.TagName)
+                    .SelectMany(y =>y.SelectMany(c => _ftm.ReadFeatures(c.OcrFeatures.ToList()).Select(f=>new Tuple<string,int>(y.Key,f.Item1))))
+                    .GroupBy(x=>x.Item1)
+                    .ToDictionary(x=>x.Key,x=>x.GroupBy(y=>y.Item2).ToDictionary(z =>/*_ftm._featureById[*/z.Key/*]*/, z=> ((double)z.Count() + 1) / (x.Count() + _ftm._featureById.Count)));
+
+
+            // user per category likellihood: p(categ,user) = p(categ|user)*p(user)
+            int totalUsers = vouchers.Select(x => x.OrganizationId).Distinct().Count();
+            _userPrior = vouchers.GroupBy(x => x.OrganizationId).ToDictionary(x => x.Key, x => ((double)x.Count() + 1) / (_totalVouchers + totalUsers));
+
+            _categUserLikellihood = vouchers.GroupBy(g => g.OrganizationId)
+                .ToDictionary(x => x.Key, x => x.GroupBy(y => y.TagName).ToDictionary(y => y.Key, y => ((double)y.Count() + 1) / (_categCounts[y.Key] + totalUsers)));
+
+            //var tmp = vouchers.Where(x => x.OrganizationId == 3634).GroupBy(x => x.TagName).Select(x => new Tuple<string, double>(x.Key, ((double)x.Count() + 1) / (categCounts[x.Key] + totalUsers))).ToList();
         }
-    }
 
-
-
-
-
-
-
-public List<Tuple<string, double>> Predict2(Voucher voucher, FeatureManager ftm) 
+        public List<Tuple<string, double>> Predict(List<string> ocrFeatures, int organizationId)
         {
-            int dim = ftm.NumberOfValidFeatures + 1;
-            double[] inputs2 = new double[dim];
+            var features = _ftm.ReadFeatures(ocrFeatures).ToDictionary(x=>x.Item1,x=>0);
 
-            var features = ftm.ReadWhenPredictingFeatures(voucher.OcrFeatures.ToList());
-            features.ForEach(x =>
+            Dictionary<string, double> posterior = new Dictionary<string, double>();
+
+            foreach (var category in _featureLikellihood)
             {
+                if (_categUserLikellihood.ContainsKey(organizationId) && _categUserLikellihood[organizationId].ContainsKey(category.Key))
                 {
-                    inputs2[x.Item1] = x.Item2;
+                    posterior.Add(category.Key, Math.Log(_userPrior[organizationId] * _categUserLikellihood[organizationId][category.Key]));
                 }
-            });
- 
-            // clasify against each category
-            var answers = _svm.Select(kvp => new Tuple<string, double>(kvp.Key, kvp.Value.Compute(inputs2)))
-                .Where(x=>x.Item2 > -0.5)
-                .ToArray();
-
-                //.OrderByDescending(x => x.Item2).ToArray();
-
-            if (answers.Length == 0)
-            {
-                return null;
-            }
-
-            var min = answers.Min(x => 1 + x.Item2);
-            var max = answers.Max(x => 1 + x.Item2);
-
-            if (min == max)
-            {
-                min = 0;
-                max = 1;
-            }
-
-            var answers2 = answers.Select(x => 
+                else
                 {
-                    var likelihoodKey = new Tuple<int, string>(voucher.OrganizationId, x.Item1);
-                    var likelihood = (_organizationPreferences._organizationTagLikelihood.ContainsKey(likelihoodKey)) ? _organizationPreferences._organizationTagLikelihood[likelihoodKey] : 0.0;
-                    //var ret = new Tuple<string, double>(x.Item1, ((1 + x.Item2 - min) / (max - min)) * 0.6 + 0.4 * likelihood);
-                    var ret = new Tuple<string, double>(x.Item1, x.Item2 * 0.8 + 0.2 * likelihood);
-                    return ret;
-                })
-                .OrderByDescending(x => x.Item2)
-                .ToArray();
+                    var unknownUserPrior = 1.0 / (_totalVouchers + _userPrior.Count + 1);
+                    var unknownLikellihood = 1.0 / (_categCounts[category.Key] + _userPrior.Count + 1);
+                    posterior.Add(category.Key, Math.Log(unknownUserPrior * unknownLikellihood));
+                }
 
+                //posterior.Add(category.Key, Math.Log(categPrior[category.Key]));
 
-            //return answers2.First().Item1;
+                foreach (var feature in _ftm._featureById)
+                {
+                    double likellihood;
 
-            if (answers2.Length > 0)
-            {
-                var prediction = answers2.First();
-                return prediction.Item1.Split(new char[] { ',' }).Select(x => new Tuple<string, double>(x, prediction.Item2)).ToList();
+                    if (category.Value.ContainsKey(feature.Key))
+                    {
+                        // we know the feature
+                        likellihood = category.Value[feature.Key];
+                    }
+                    else
+                    {
+                        // feature is not used in category
+                        // therfore apply not unknown feature likellihood
+                        likellihood = 1.0 / (category.Value.Count + _ftm._featureById.Count + 1);
+                    }
+
+                    if (features.ContainsKey(feature.Key))
+                    {
+                        // existance likellihood
+                        posterior[category.Key] += Math.Log(likellihood);
+                    }
+                    else
+                    {
+                        posterior[category.Key] += Math.Log(1.0 - likellihood);
+                    }
+                }
             }
-            else
-            {
-                return null;
-            }
+
+            return posterior.Select(x=> new Tuple<string, double>(x.Key,x.Value)).OrderByDescending(x=>x.Item2).Take(5).ToList();
         }
+
+    }
+}
