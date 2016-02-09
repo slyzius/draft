@@ -96,6 +96,15 @@ namespace WindowsFormsApplication1
 
             return posterior.Select(x=> new Tuple<string, double>(x.Key,x.Value)).OrderByDescending(x=>x.Item2).Take(5).ToList();
         }
+        
+        private static List<Tuple<string, double>> SelectPreferred(IEnumerable<Tuple<string, double>> values)
+        {
+            double avg = values.Select(x => x.Item2).Sum() / values.Count();
+            double sd = Math.Sqrt(values.Sum(x => Math.Pow(x.Item2 - avg, 2))/ values.Count());
+
+            return sd > 0 ? values.Where(x => x.Item2 >= avg).Select(x => new Tuple<string, double>(x.Item1, (x.Item2 - avg) / sd)).ToList()
+                : values.Select(x => new Tuple<string, double>(x.Item1, 1)).ToList();
+        }
 
     }
 }
