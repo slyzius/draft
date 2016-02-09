@@ -94,15 +94,17 @@ namespace WindowsFormsApplication1
                 }
             }
 
-            return posterior.Select(x=> new Tuple<string, double>(x.Key,x.Value)).OrderByDescending(x=>x.Item2).Take(5).ToList();
+            var tmp = posterior.Where(x => selectedFeatures[x.Key] > 0).Select(x => new Tuple<string, double>(x.Key, x.Value)).OrderByDescending(x => x.Item2).Take(3*2).ToList();
+            return SelectPreferred(tmp);
+            //return tmp;
         }
-        
+
         private static List<Tuple<string, double>> SelectPreferred(IEnumerable<Tuple<string, double>> values)
         {
             double avg = values.Select(x => x.Item2).Sum() / values.Count();
             double sd = Math.Sqrt(values.Sum(x => Math.Pow(x.Item2 - avg, 2))/ values.Count());
 
-            return sd > 0 ? values.Where(x => x.Item2 >= avg).Select(x => new Tuple<string, double>(x.Item1, (x.Item2 - avg) / sd)).ToList()
+            return sd > 0 ? values.Select(x => new Tuple<string, double>(x.Item1, (x.Item2 - avg) / sd)).Where(x => x.Item2 >= 0.4).ToList()
                 : values.Select(x => new Tuple<string, double>(x.Item1, 1)).ToList();
         }
 
