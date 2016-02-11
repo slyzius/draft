@@ -1,0 +1,356 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace WindowsFormsApplication1
+{
+    /// <summary>
+    /// Naive Byesain classifier. Category prior is joint probability of category and user preference: p(cat,user) = p(cat|user)*p(user)
+    /// We can ommit p(user), because it is the same for each category in classiffication.
+    /// </summary>
+    public class NaiveBayesian
+    {
+        /// <summary>
+        /// Current version
+        /// </summary>
+        int Version = 101;
+
+        /// <summary>
+        /// Feature managers' unique id.
+        /// </summary>
+        Guid FeatureSerializationId{ get; set; }
+
+        /// <summary>
+        /// Training features
+        /// </summary>
+        FeatureManager _ftm;
+
+        /// <summary>
+        /// number of vouchers per category
+        /// </summary>
+        Dictionary<string, int> _categCounts;
+
+        /// <summary>
+        /// Conditional probability of a particular feature belongs to category
+        /// </summary>
+        Dictionary<string, Dictionary<int,double>> _featureLikellihood;
+
+        /// <summary>
+        /// Conditional probability of user choosing particular category
+        /// </summary>
+        Dictionary<int, Dictionary<string, double>> _categUserLikellihood;
+
+        /// <summary>
+        /// User prior probability. (not really used)
+        /// </summary>
+        Dictionary<int, double> _userPrior;
+
+        /// <summary>
+        /// For performance reasons, precalculate for each category posteriors when all features is missing in test voucher
+        /// So, it is a multiplication of negative conditional probabilities (we using Bernulli):
+        /// posterior(c) = (1-p(ccategX | feature1))*....*(1-p(ccategX | featureN)))
+        /// Because we use Log likellihood, the probabilities above is just a sum of 
+        /// posterior(c) = log(1-p(ccategX | feature1))+....+log(1-p(ccategX | featureN)))
+        /// Then when we predict, for each existing feature in the test voucher simply do:
+        /// posterior(c) = posterior(c) - log(1-p(ccategX | featureY)) + log(p(ccategX | featureY))
+        /// </summary>
+        Dictionary<string, double> _posterior = new Dictionary<string, double>();
+
+        /// <summary>
+        /// Load model from a file
+        /// </summary>
+        /// <param name="file"></param>
+        /// <param name="ftm"></param>
+        public void Load(string file,  FeatureManager ftm)
+        {
+            _ftm = ftm;
+
+            using (FileStream fs = File.OpenRead(file))
+            using (BinaryReader reader = new BinaryReader(fs))
+            {
+                Read(reader);
+            }
+        }
+
+        public void Save(string file)
+        {
+            using (FileStream fs = File.OpenWrite(file))
+            using (BinaryWriter writer = new BinaryWriter(fs))
+            {
+                Write(writer);
+            }
+        }
+        
+        /// <summary>
+        /// Train model
+        /// </summary>
+        /// <param name="ftm"></param>
+        public void Train(FeatureManager ftm)
+        {
+            _ftm = ftm;
+
+            FeatureSerializationId = _ftm.SerializationId;
+
+            var vouchers = _ftm.TrainingData;
+
+            _categCounts = vouchers.GroupBy(x => x.Voucher.TagName).ToDictionary(x => x.Key, x => x.Count());
+
+            // compute likellihood of feature given category(tag)
+            var tagToFeaturesToVouchers = vouchers.GroupBy(g => g.Voucher.TagName)
+                .ToDictionary(x => x.Key, x =>
+                    x.SelectMany(y => y.WeightedFeatures).GroupBy(y => y.Item1).ToDictionary(z => z.Key, z => z.Count()));
+            
+            var tagToFeatures = tagToFeaturesToVouchers.ToDictionary(x => x.Key, x => x.Value.Sum(y => y.Value));
+
+            _featureLikellihood = tagToFeaturesToVouchers
+                .ToDictionary(x => x.Key, x => x.Value
+                    .ToDictionary(y => y.Key, y => ((double)y.Value + 1) / (tagToFeatures[x.Key] + _ftm.NumberOfValidFeatures)));
+
+            // user per category likellihood: p(categ,user) = p(categ|user)*p(user)
+            int totalVouchers = vouchers.Count;
+            int totalUsers = vouchers.Select(x => x.Voucher.OrganizationId).Distinct().Count();
+            _userPrior = vouchers.GroupBy(x => x.Voucher.OrganizationId).ToDictionary(x => x.Key, x => ((double)x.Count() + 1) / (totalVouchers + totalUsers));
+
+            _categUserLikellihood = vouchers.GroupBy(g => g.Voucher.OrganizationId)
+                .ToDictionary(x => x.Key, x => x.GroupBy(y => y.Voucher.TagName).ToDictionary(y => y.Key, y => ((double)y.Count() + 1) / (_categCounts[y.Key] + totalUsers)));
+
+            // make general posteriors
+            _posterior = _featureLikellihood.ToDictionary(x=>x.Key,x=>0.0);
+
+            foreach (var category in _featureLikellihood)
+            {
+                foreach (var featureId in _ftm.ReadFeatures())
+                {
+                    double likellihood;
+
+                    if (category.Value.ContainsKey(featureId))
+                    {
+                        // we know the feature
+                        likellihood = category.Value[featureId];
+                    }
+                    else
+                    {
+                        // feature is not used in category
+                        // therefore apply unknown feature likellihood
+                        likellihood = 1.0 / (category.Value.Count + _ftm.NumberOfValidFeatures + 1);
+                    }
+                    _posterior[category.Key] += Math.Log(1.0 - likellihood);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Predict a set of possible categories the test voucher belongs to.
+        /// </summary>
+        /// <param name="ocrFeatures"></param>
+        /// <param name="organizationId"></param>
+        /// <param name="top"></param>
+        /// <returns></returns>
+        public List<Prediction> Predict(List<string> ocrFeatures, int organizationId, int top = 3)
+        {
+            var features = _ftm.ReadWeightedFeatures(ocrFeatures).ToDictionary(x => x.Item1, x => 0);
+
+            Dictionary<string, int> selectedFeatures = _posterior.ToDictionary(x => x.Key, x => 0);
+            Dictionary<string, double> posterior = _posterior.ToDictionary(x=>x.Key, x=>x.Value);
+
+            foreach (var category in _featureLikellihood)
+            {
+                if (_categUserLikellihood.ContainsKey(organizationId) && _categUserLikellihood[organizationId].ContainsKey(category.Key))
+                {
+                    posterior[category.Key] += Math.Log(_categUserLikellihood[organizationId][category.Key]);
+                }
+                else
+                {
+                    var unknownLikellihood = 1.0 / (_categCounts[category.Key] + _userPrior.Count + 1);
+                    posterior[category.Key] += Math.Log(unknownLikellihood);
+                }
+
+                foreach (var feature in features)
+                {
+                    double likellihood;
+                    if (category.Value.ContainsKey(feature.Key))
+                    {
+                        // we know the feature
+                        likellihood = category.Value[feature.Key];
+                        selectedFeatures[category.Key]++;
+                    }
+                    else
+                    {
+                        // feature is not used in category
+                        // therefore apply unknown feature likellihood
+                        likellihood = 1.0 / (category.Value.Count + _ftm.NumberOfValidFeatures + 1);
+                    }
+                    posterior[category.Key] += Math.Log(likellihood) - Math.Log(1 - likellihood);
+                }
+            }
+            
+            var tmp = posterior.Where(x => selectedFeatures[x.Key] > 0).Select(x => new Tuple<string, double>(x.Key, x.Value)).OrderByDescending(x => x.Item2).Take(top* 2).ToList();
+            return SelectPreferred(tmp,top);
+        }
+
+        private static List<Prediction> SelectPreferred(IEnumerable<Tuple<string, double>> values,int top)
+        {
+            Func<double, PredictionConfidence> getConfidence = (zscore) =>
+            {
+                if (zscore >= 1.0)
+                {
+                    return PredictionConfidence.High;
+                }
+                else if (zscore >= 0.4)
+                {
+                    return PredictionConfidence.Medium;
+                }
+                else
+                {
+                    return PredictionConfidence.Low;
+                }
+            };
+
+            double avg = values.Select(x => x.Item2).Sum() / values.Count();
+            double sd = Math.Sqrt(values.Sum(x => Math.Pow(x.Item2 - avg, 2)) / values.Count());
+
+            return sd > 0 ? values
+                .Select(x => new Prediction { Tag = x.Item1, ConfidenceLevel = getConfidence((x.Item2 - avg) / sd), Score = (x.Item2 - avg) / sd })
+                .Where(x => x.ConfidenceLevel == PredictionConfidence.High || x.ConfidenceLevel == PredictionConfidence.Medium)
+                .Take(top)
+                .ToList()
+                : values.Select(x => new Prediction { Tag = x.Item1, ConfidenceLevel = PredictionConfidence.Medium, Score = 1 }).Take(top).ToList();
+        }
+
+#region serialize
+
+        public void Read(BinaryReader binaryReader)
+        {
+            Func<BinaryReader, int> deserialize_int = (reader) =>
+            {
+                return reader.ReadInt32();
+            };
+
+            Func<BinaryReader, double> deserialize_double = (reader) =>
+            {
+                return reader.ReadDouble();
+            };
+
+            Func<BinaryReader, string> deserialize_string = (reader) =>
+            {
+                return reader.ReadString();
+            };
+
+            Func<BinaryReader, Dictionary<int, double>> deserialize_dictionary_int_double = (reader) =>
+            {
+                Dictionary<int, double> ret = new Dictionary<int, double>();
+                ReadFile<int, double>(reader, ret, deserialize_int, deserialize_double);
+                return ret;
+            };
+
+            Func<BinaryReader, Dictionary<string, double>> deserialize_dictionary_string_double = (reader) =>
+            {
+                Dictionary<string, double> ret = new Dictionary<string, double>();
+                ReadFile<string, double>(reader, ret, deserialize_string, deserialize_double);
+                return ret;
+            };
+
+            Func<BinaryReader, Guid> deserialize_guid = (reader) =>
+            {
+                return Guid.Parse(reader.ReadString());
+            };
+            
+            int version = deserialize_int(binaryReader);
+            if (Version != version)
+            {
+                throw new InvalidOperationException("Version of Model file is not compatible");
+            }
+
+            FeatureSerializationId = deserialize_guid(binaryReader);
+            if (FeatureSerializationId != _ftm.SerializationId)
+            {
+                throw new InvalidOperationException("Version of Feature Manager file is not compatible with Model file.");
+            }
+
+            _categCounts = new Dictionary<string,int>();
+            ReadFile<string, int>(binaryReader, _categCounts, deserialize_string, deserialize_int);
+            
+            _featureLikellihood = new Dictionary<string,Dictionary<int,double>>();
+            ReadFile<string,Dictionary<int,double>>(binaryReader, _featureLikellihood, deserialize_string, deserialize_dictionary_int_double);
+
+            _categUserLikellihood = new Dictionary<int,Dictionary<string,double>>();
+            ReadFile<int, Dictionary<string, double>>(binaryReader, _categUserLikellihood, deserialize_int, deserialize_dictionary_string_double);
+
+            _userPrior = new Dictionary<int,double>();
+            ReadFile<int, double>(binaryReader, _userPrior, deserialize_int, deserialize_double);
+
+            _posterior = new Dictionary<string, double>();
+            ReadFile<string, double>(binaryReader, _posterior, deserialize_string, deserialize_double);
+        }
+
+        static void ReadFile<TKey, TValue>(BinaryReader reader, Dictionary<TKey, TValue> dict, Func<BinaryReader, TKey> deserializeKey, Func<BinaryReader, TValue> deserializeValue)
+        {
+            int count = reader.ReadInt32();
+
+            for (int i = 0; i < count; i++)
+            {
+                TKey key = deserializeKey(reader);
+                TValue val = deserializeValue(reader);
+                dict.Add(key, val);
+            }
+        }
+
+        public void Write(BinaryWriter binaryWriter)
+        {
+            Action<int, BinaryWriter> serialize_int = (Int, writer) =>
+            {
+                writer.Write(Int);
+            };
+
+            Action<double, BinaryWriter> serialize_double = (dbl, writer) =>
+            {
+                writer.Write(dbl);
+            };
+
+            Action<string, BinaryWriter> serialize_string = (str, writer) =>
+            {
+                writer.Write(str);
+            };
+
+            Action<Dictionary<string, double>, BinaryWriter> serialize_dictionary_string_double = (str, writer) =>
+            {
+                WriteFile<string, double>(writer, str, serialize_string, serialize_double);
+            };
+
+            Action<Dictionary<int, double>, BinaryWriter> serialize_dictionary_int_double = (str, writer) =>
+            {
+                WriteFile<int, double>(writer, str, serialize_int, serialize_double);
+            };
+
+            Action<Guid, BinaryWriter> serialize_guid = (guid, writer) =>
+            {
+                writer.Write(guid.ToString());
+            };
+
+            serialize_int(Version,binaryWriter);
+            serialize_guid(FeatureSerializationId,binaryWriter);
+            WriteFile<string, int>(binaryWriter, _categCounts, serialize_string, serialize_int);
+            WriteFile<string,Dictionary<int,double>>(binaryWriter, _featureLikellihood, serialize_string, serialize_dictionary_int_double);
+            WriteFile<int, Dictionary<string, double>>(binaryWriter, _categUserLikellihood, serialize_int, serialize_dictionary_string_double);
+            WriteFile<int, double>(binaryWriter, _userPrior, serialize_int, serialize_double);
+            WriteFile<string, double>(binaryWriter, _posterior, serialize_string, serialize_double);
+        }
+
+        static void WriteFile<TKey, TValue>(BinaryWriter writer, Dictionary<TKey, TValue> dict, Action<TKey, BinaryWriter> serializeKey, Action<TValue, BinaryWriter> serializeValue)
+        {
+            // Put count.
+            writer.Write(dict.Count);
+            // Write pairs.
+            foreach (var pair in dict)
+            {
+                serializeKey(pair.Key, writer);
+                serializeValue(pair.Value, writer);
+            }
+        }
+
+#endregion
+    }
+}
