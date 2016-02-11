@@ -1,0 +1,761 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace WindowsFormsApplication1
+{
+    public class VoucherWeightedFeatures
+    {
+        public List<Tuple<int, double>> WeightedFeatures { get; set; }
+        public Voucher Voucher { get; set; }
+    }
+
+    class VoucherFeatures : IEquatable<VoucherFeatures>
+    {
+        public List<Tuple<int, double>> Features { get; set; }
+
+        #region IEquatable
+
+        public bool Equals(VoucherFeatures other)
+        {
+            if (ReferenceEquals(null, other)) return false;
+            if (ReferenceEquals(this, other)) return true;
+
+            if (other.Features.Count == Features.Count)
+            {
+                for (int i = 0; i < Features.Count && i < other.Features.Count; i++)
+                {
+                    if (other.Features[i].Item1 != Features[i].Item1)
+                    {
+                        return false;
+                    }
+                }
+                return true;
+            }
+            return false;
+        }
+
+        #endregion
+
+        #region object
+
+        public override bool Equals(object obj)
+        {
+            if (ReferenceEquals(null, obj)) return false;
+            if (ReferenceEquals(this, obj)) return true;
+            return obj is VoucherFeatures && Equals((VoucherFeatures)obj);
+        }
+
+        public override int GetHashCode()
+        {
+            int hash = Features.Count;
+            for (int i = 0; i < Features.Count; ++i)
+            {
+                hash = unchecked(hash * 314159 + Features[i].Item1);
+            }
+            return hash;
+        }
+
+
+        #endregion
+
+    }
+
+    public class FeatureManager
+    {
+        /// <summary>
+        /// The id/timestamp of the serilization.
+        /// </summary>
+        public Guid SerializationId = Guid.NewGuid();
+
+        /// <summary>
+        /// Current version
+        /// </summary>
+        int Version = 101;
+
+        /// <summary>
+        /// Stores unique vouchers to pass to models to train
+        /// </summary>
+        List<VoucherWeightedFeatures> _trainingData;
+        public List<VoucherWeightedFeatures> TrainingData { get { return _trainingData; } }
+
+        /// <summary>
+        /// when features are filtered by weights, we need to make sure those features is sequentually ordered (0,1,2,3,4,5,6,7,8,...)
+        /// This is needed to train model like SVM were sparse feature vector is used
+        /// </summary>
+        Dictionary<int, int> _filteredFeatures = new Dictionary<int, int>();
+
+        /// <summary>
+        /// Importance of the feature ]0,1]
+        /// </summary>
+        Dictionary<int, double> _featureWeight = new Dictionary<int, double>();
+
+        /// <summary>
+        /// Map feature Id to feature value
+        /// </summary>
+        Dictionary<int, string> _featureById = new Dictionary<int, string>();
+
+        /// <summary>
+        /// Inverted n-gramms index. Each n-gramm point to list of features 
+        /// </summary>
+        Dictionary<string, Dictionary<int, int>> _bgrams = new Dictionary<string, Dictionary<int, int>>();
+
+        /// <summary>
+        /// n-gramm size in the number of letters
+        /// </summary>
+        int _ngram = 3;
+
+        /// <summary>
+        /// Default words Jaccard similiarity. Words similiarity calculated by performing words n-gramm Jaccard similiarity.
+        /// </summary>
+        public double _similiarityThreshold = 0.6;
+        public double SimiliarityThreshold { get { return _similiarityThreshold; } set { _similiarityThreshold = value; } }
+
+        /// <summary>
+        /// Specify the filtering precentage of the features. For example - 0.5 means all features that is shared between 50% of categories will be removed
+        /// </summary>
+        const double _exponentialConstant = 0.01;
+        public double MaxWeightThreshold { get { return _maxWeightThreshold; } set { _maxWeightThreshold = value; _weigthExpValue = Math.Log(_exponentialConstant) / value; } }
+
+        /// <summary>
+        /// Specify the filtering precentage of the features. For example - 0.5 means all features that is shared between 50% of categories will be removed
+        /// </summary>
+        double _maxWeightThreshold = 0.15;
+
+        /// <summary>
+        ///  Exponential component to be calculated. Used for filtering unimportant features
+        /// </summary>
+        double _weigthExpValue = Math.Log(_exponentialConstant) / 0.15;
+
+        /// <summary>
+        /// Return number of relevant features. We ommit some features if their importance is low, e.g. the feature cannot
+        /// uniqually represent the vouchers category: moms, faktura,...
+        /// Used for SVM model
+        /// </summary>
+        int _numberOfValidFeatures = 0;
+
+        /// <summary>
+        /// Return number of relevant features. We ommit some features if their importance is low, e.g. the feature cannot
+        /// uniqually represent the vouchers category: moms, faktura,...
+        /// Used for SVM model
+        /// </summary>
+        public int NumberOfValidFeatures
+        {
+            get
+            {
+                if (_numberOfValidFeatures != 0)
+                {
+                    return _numberOfValidFeatures;
+                }
+                else
+                {
+                    _numberOfValidFeatures = _featureWeight.Where(x => x.Value >= _exponentialConstant).Count();
+                    return _numberOfValidFeatures;
+                }
+            }
+        }
+
+        #region serialization
+
+        public void Load(string file)
+        {
+            using (FileStream fs = File.OpenRead(file))
+            using (BinaryReader reader = new BinaryReader(fs))
+            {
+                Read(reader);
+            }
+        }
+
+        public void Read(BinaryReader binaryReader)
+        {
+            Func<BinaryReader, int> deserialize_int = (reader) =>
+            {
+                return reader.ReadInt32();
+            };
+
+            Func<BinaryReader, double> deserialize_double = (reader) =>
+            {
+                return reader.ReadDouble();
+            };
+
+            Func<BinaryReader, string> deserialize_string = (reader) =>
+            {
+                return reader.ReadString();
+            };
+
+            Func<BinaryReader, Dictionary<int, int>> deserialize_dictionary_int_int = (reader) =>
+            {
+                Dictionary<int, int> ret = new Dictionary<int, int>();
+                ReadFile<int, int>(reader, ret, deserialize_int, deserialize_int);
+                return ret;
+            };
+
+            Func<BinaryReader, Guid> deserialize_guid = (reader) =>
+            {
+                return Guid.Parse(reader.ReadString());
+            };
+
+            Func<BinaryReader, List<VoucherWeightedFeatures>> deserialize_list_VoucherWeightedFeatures = (reader) =>
+            {
+                List<VoucherWeightedFeatures> ret = new List<VoucherWeightedFeatures>();
+
+                int cnt = reader.ReadInt32();
+
+                for (int i = 0; i < cnt; i++)
+                {
+                    var voucher = new Voucher
+                    {
+                        TagName = reader.ReadString(),
+                        Id = reader.ReadInt32(),
+                        OrganizationId = reader.ReadInt32(),
+                        Company = reader.ReadString(),
+                        OcrPath = reader.ReadString()
+                    };
+
+                    // read OCR features
+                    int nOcr = reader.ReadInt32();
+                    //voucher.OcrFeatures = new List<string>();
+                    for (int y = 0; y < nOcr; y++)
+                    {
+                        //voucher.OcrFeatures.Add(reader.ReadString());
+                    }
+
+                    var features = new List<Tuple<int, double>>();
+                    int fcnt = reader.ReadInt32();
+                    for (int y = 0; y < fcnt; y++)
+                    {
+                        features.Add(new Tuple<int, double>(reader.ReadInt32(), reader.ReadDouble()));
+                    }
+
+                    ret.Add(new VoucherWeightedFeatures { Voucher = voucher, WeightedFeatures = features });
+                }
+
+                return ret;
+            };
+
+            int version = deserialize_int(binaryReader);
+            if (Version != version)
+            {
+                throw new InvalidOperationException("File is not compatible");
+            }
+            SerializationId = deserialize_guid(binaryReader);
+            _trainingData = deserialize_list_VoucherWeightedFeatures(binaryReader);
+
+            ReadFile<int, int>(binaryReader, _filteredFeatures, deserialize_int, deserialize_int);
+            ReadFile<int, double>(binaryReader, _featureWeight, deserialize_int, deserialize_double);
+            ReadFile<int, string>(binaryReader, _featureById, deserialize_int, deserialize_string);
+            ReadFile<string, Dictionary<int, int>>(binaryReader, _bgrams, deserialize_string, deserialize_dictionary_int_int);
+        }
+
+        static void ReadFile<TKey, TValue>(BinaryReader reader, Dictionary<TKey, TValue> dict, Func<BinaryReader, TKey> deserializeKey, Func<BinaryReader, TValue> deserializeValue)
+        {
+            int count = reader.ReadInt32();
+
+            for (int i = 0; i < count; i++)
+            {
+                TKey key = deserializeKey(reader);
+                TValue val = deserializeValue(reader);
+                dict.Add(key, val);
+            }
+        }
+
+        public void Save(string file)
+        {
+            using (FileStream fs = File.OpenWrite(file))
+            using (BinaryWriter writer = new BinaryWriter(fs))
+            {
+                Write(writer);
+            }
+        }
+
+        public void Write(BinaryWriter binaryWriter)
+        {
+            Action<int, BinaryWriter> serialize_int = (Int, writer) =>
+            {
+                writer.Write(Int);
+            };
+
+            Action<double, BinaryWriter> serialize_double = (dbl, writer) =>
+            {
+                writer.Write(dbl);
+            };
+
+            Action<string, BinaryWriter> serialize_string = (str, writer) =>
+            {
+                writer.Write(str);
+            };
+
+            Action<Dictionary<int, int>, BinaryWriter> serialize_dictionary_int_int = (str, writer) =>
+            {
+                WriteFile<int, int>(writer, str, serialize_int, serialize_int);
+            };
+
+            Action<Guid, BinaryWriter> serialize_guid = (guid, writer) =>
+            {
+                writer.Write(guid.ToString());
+            };
+
+            Action<List<VoucherWeightedFeatures>, BinaryWriter> serialize_list_VoucherWeightedFeatures = (voucherFeatures, writer) =>
+            {
+                writer.Write(voucherFeatures.Count);
+
+                foreach (var voucherFeature in voucherFeatures)
+                {
+                    var voucher = voucherFeature.Voucher;
+
+                    // write attributes
+                    writer.Write(voucher.TagName);
+                    writer.Write(voucher.Id);
+                    writer.Write(voucher.OrganizationId);
+                    writer.Write(voucher.Company);
+                    writer.Write(voucher.OcrPath);
+
+                    // write OCR features
+                    writer.Write(voucher.OcrFeatures.Count);
+                    foreach (var f in voucher.OcrFeatures)
+                    {
+                        writer.Write(f);
+                    }
+
+                    var features = voucherFeature.WeightedFeatures;
+                    writer.Write(features.Count);
+                    foreach (var feature in features)
+                    {
+                        writer.Write(feature.Item1);
+                        writer.Write(feature.Item2);
+                    }
+                }
+            };
+
+            serialize_int(Version, binaryWriter);
+            serialize_guid(SerializationId, binaryWriter);
+            serialize_list_VoucherWeightedFeatures(_trainingData, binaryWriter);
+
+            WriteFile<int, int>(binaryWriter, _filteredFeatures, serialize_int, serialize_int);
+            WriteFile<int, double>(binaryWriter, _featureWeight, serialize_int, serialize_double);
+            WriteFile<int, string>(binaryWriter, _featureById, serialize_int, serialize_string);
+            WriteFile<string, Dictionary<int, int>>(binaryWriter, _bgrams, serialize_string, serialize_dictionary_int_int);
+        }
+
+        static void WriteFile<TKey, TValue>(BinaryWriter writer, Dictionary<TKey, TValue> dict, Action<TKey, BinaryWriter> serializeKey, Action<TValue, BinaryWriter> serializeValue)
+        {
+            // Put count.
+            writer.Write(dict.Count);
+            // Write pairs.
+            foreach (var pair in dict)
+            {
+                serializeKey(pair.Key, writer);
+                serializeValue(pair.Value, writer);
+            }
+        }
+
+        #endregion
+
+        #region N-Gramm
+
+        short[] StringToByteArray(string word)
+        {
+            var data = System.Text.UnicodeEncoding.Unicode.GetBytes(word);
+            short[] sdata = new short[data.Length / 2];
+            Buffer.BlockCopy(data, 0, sdata, 0, data.Length);
+            return sdata;
+        }
+
+        bool IsNGramValid(string bg)
+        {
+            int m = 0;
+
+            for (int i = 0; i < _ngram; i++)
+            {
+                if (bg[i] == '?')
+                    m++;
+            }
+            return m < 1;
+        }
+
+        List<string> MakeNGram(string word)
+        {
+            short[] b = StringToByteArray(word);
+            short[] bg = new short[_ngram];
+            List<string> ret = new List<string>();
+
+            for (int i = -1; i < b.Length - (_ngram - 2); i++)
+            {
+                for (int g = i; g < i + _ngram; g++)
+                {
+                    bg[g - i] = (g < 0 || g >= b.Length) ? (byte)'$' : b[g];
+                }
+
+                byte[] result = new byte[_ngram * 2];
+                Buffer.BlockCopy(bg, 0, result, 0, result.Length);
+                var bgString = System.Text.UnicodeEncoding.Unicode.GetString(result);
+
+                ret.Add(bgString);
+            }
+            return ret;
+        }
+
+        #endregion
+
+        #region IFeatureManager
+
+        public void Initialize(IEnumerable<Voucher> vouchers)
+        {
+            #region Split Words in Tri-Grams
+
+            Dictionary<int, string> invWords = new Dictionary<int, string>();
+            Dictionary<int, int> wordFrequency = new Dictionary<int, int>();
+            Dictionary<string, Dictionary<int, int>> bgrams = new Dictionary<string, Dictionary<int, int>>();
+
+            int iword = 0;
+
+            Dictionary<string, int> exists = new Dictionary<string, int>();
+            foreach (var tag in vouchers.SelectMany(x => x.OcrFeatures))
+            {
+                if (!exists.ContainsKey(tag))
+                {
+                    exists.Add(tag, iword);
+                    invWords.Add(iword, tag);
+                    wordFrequency.Add(iword, 1);
+
+                    short[] b = StringToByteArray(tag);
+                    short[] bg = new short[_ngram];
+
+                    for (int i = -1; i < b.Length - (_ngram - 2); i++)
+                    {
+                        for (int g = i; g < i + _ngram; g++)
+                        {
+                            bg[g - i] = (g < 0 || g >= b.Length) ? (byte)'$' : b[g];
+                        }
+
+                        byte[] result = new byte[_ngram * 2];
+                        Buffer.BlockCopy(bg, 0, result, 0, result.Length);
+                        var bgString = System.Text.UnicodeEncoding.Unicode.GetString(result);
+
+                        if (bgrams.ContainsKey(bgString))
+                        {
+                            if (bgrams[bgString].ContainsKey(iword))
+                            {
+                                bgrams[bgString][iword]++;
+                            }
+                            else
+                            {
+                                bgrams[bgString].Add(iword, 1);
+                            }
+                        }
+                        else
+                        {
+                            bgrams.Add(bgString, new Dictionary<int, int> { { iword, 1 } });
+                        }
+                    }
+
+                    iword++;
+                }
+                else
+                {
+                    wordFrequency[exists[tag]]++;
+                }
+            }
+            exists.Clear();
+
+            #endregion
+
+            #region Compute similiarity matrix
+
+            var sync = new Object();
+            List<Tuple<int, int, double>> similiaritiesMerged = new List<Tuple<int, int, double>>();
+            Action<List<Tuple<int, int, double>>> mergeSimiliarities = (s1) =>
+            {
+                lock (sync)
+                {
+                    similiaritiesMerged.AddRange(s1);
+                }
+            };
+
+            Parallel.ForEach<KeyValuePair<int, string>, List<Tuple<int, int, double>>>(invWords, // source collection
+                                    () => new List<Tuple<int, int, double>>(), // method to initialize the local variable
+                                    (words, loop, similiarities) => // method invoked by the loop on each iteration
+                                    {
+                                        Dictionary<int, double> matches = new Dictionary<int, double>();
+                                        List<string> ngrams = MakeNGram(words.Value);
+                                        foreach (var bg in ngrams.GroupBy(x => x))
+                                        {
+                                            if (IsNGramValid(bg.Key) && bgrams.ContainsKey(bg.Key))
+                                            {
+                                                foreach (var x in bgrams[bg.Key])
+                                                {
+                                                    if (matches.ContainsKey(x.Key))
+                                                    {
+                                                        matches[x.Key] += Math.Min(x.Value, bg.Count());
+                                                    }
+                                                    else
+                                                    {
+                                                        matches.Add(x.Key, Math.Min(x.Value, bg.Count()));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        var ret = matches
+                                            .Where(x => words.Key != x.Key)
+                                            .Select(x => new Tuple<int, int, double>(words.Key, x.Key, x.Value / ((invWords[x.Key].Length - _ngram + 3) + ngrams.Count - x.Value)))
+                                            .Where(x => x.Item3 >= _similiarityThreshold)
+                                            .ToList();
+
+                                        ret.ForEach(x => similiarities.Add(x));
+                                        return similiarities; // value to be passed to next iteration
+                                    },
+                // Method to be executed when each partition has completed.
+                // finalResult is the final value of subtotal for a particular partition.
+                                    (finalResult) => mergeSimiliarities(finalResult)
+                                    );
+
+
+
+
+            #endregion
+
+            #region Cluster words using Afinitty Propagation algorithm
+
+            APClustering apCluster = new APClustering { Lam = 0.5, InvWords = invWords, Similiarities = similiaritiesMerged };
+            apCluster.Cluster();
+
+            invWords.ToList().ForEach(x =>
+            {
+                // check if data point
+                if (!apCluster.Word2Cluster.ContainsKey(x.Key) && wordFrequency[x.Key] > 1)
+                {
+                    List<string> ngrams = MakeNGram(x.Value);
+                    double match = ((double)ngrams.Where(w => IsNGramValid(w)).Count()) / x.Value.Length;
+                    if (match >= 0.7)
+                    {
+                        apCluster.Word2Cluster.Add(x.Key, x.Key);
+                    }
+                }
+            });
+
+
+            #endregion
+
+            #region Create Final Features Tri-Grams
+            int ifeature = 0;
+            Dictionary<string, int> existsFeature = new Dictionary<string, int>();
+
+            foreach (var tag in apCluster.Word2Cluster.Values.Distinct().Select(x => invWords[x]))
+            {
+                if (!existsFeature.ContainsKey(tag))
+                {
+                    existsFeature.Add(tag, ifeature);
+
+                    _featureById.Add(ifeature, tag);
+                    _featureWeight.Add(ifeature, 1.0);
+
+                    short[] b = StringToByteArray(tag);
+                    short[] bg = new short[_ngram];
+
+                    for (int i = -1; i < b.Length - (_ngram - 2); i++)
+                    {
+                        for (int g = i; g < i + _ngram; g++)
+                        {
+                            bg[g - i] = (g < 0 || g >= b.Length) ? (byte)'$' : b[g];
+                        }
+
+                        byte[] result = new byte[_ngram * 2];
+                        Buffer.BlockCopy(bg, 0, result, 0, result.Length);
+                        var bgString = System.Text.UnicodeEncoding.Unicode.GetString(result);
+
+                        if (_bgrams.ContainsKey(bgString))
+                        {
+                            if (_bgrams[bgString].ContainsKey(ifeature))
+                            {
+                                _bgrams[bgString][ifeature]++;
+                            }
+                            else
+                            {
+                                _bgrams[bgString].Add(ifeature, 1);
+                            }
+                        }
+                        else
+                        {
+                            _bgrams.Add(bgString, new Dictionary<int, int> { { ifeature, 1 } });
+                        }
+                    }
+
+                    ifeature++;
+                }
+            }
+            #endregion
+
+            #region Compute feature importance/weights
+
+            //Create Features to Vouchers Mappings
+            Dictionary<int, List<Voucher>> feature2Vouchers = new Dictionary<int, List<Voucher>>();
+            var syncMergeFeature2Vouchers = new Object();
+            List<Tuple<int, double>> feature2VouchersMerged = new List<Tuple<int, double>>();
+            Action<Dictionary<int, List<Voucher>>> mergefeature2Vouchers = (s1) =>
+            {
+                lock (syncMergeFeature2Vouchers)
+                {
+                    foreach (var kvp in s1)
+                    {
+                        if (feature2Vouchers.ContainsKey(kvp.Key))
+                        {
+                            feature2Vouchers[kvp.Key].AddRange(kvp.Value);
+                        }
+                        else
+                        {
+                            feature2Vouchers.Add(kvp.Key, kvp.Value);
+                        }
+                    }
+                }
+            };
+
+            Parallel.ForEach<Voucher, Dictionary<int, List<Voucher>>>(vouchers, // source collection
+                                    () => new Dictionary<int, List<Voucher>>(), // method to initialize the local variable
+                                    (voucher, loop, partfeature2Vouchers) => // method invoked by the loop on each iteration
+                                    {
+                                        List<Tuple<int, double>> features = ExpandFeatures(voucher.OcrFeatures.ToList());
+
+                                        features.ForEach(x =>
+                                        {
+                                            if (partfeature2Vouchers.ContainsKey(x.Item1))
+                                            {
+                                                partfeature2Vouchers[x.Item1].Add(voucher);
+                                            }
+                                            else
+                                            {
+                                                partfeature2Vouchers.Add(x.Item1, new List<Voucher> { voucher });
+                                            }
+                                        });
+                                        return partfeature2Vouchers; // value to be passed to next iteration
+                                    },
+                // Method to be executed when each partition has completed.
+                // finalResult is the final value of subtotal for a particular partition.
+                                    (finalResult) => mergefeature2Vouchers(finalResult)
+                                    );
+
+            // Compute feature importance/weights
+            var totalDocsPerCateg = vouchers.GroupBy(x => x.TagName).ToDictionary(x => x.Key, x => x.Count());
+            double totalCategs = totalDocsPerCateg.Count();
+            Dictionary<Tuple<int, string>, double> weights = new Dictionary<Tuple<int, string>, double>();
+
+            foreach (var feature in feature2Vouchers)
+            {
+                var categs = feature.Value.GroupBy(x => x.TagName);
+                double noOfFeatureCategs = categs.Count();
+                double f_idf = 1 - (noOfFeatureCategs - 1) / totalCategs;
+                _featureWeight[feature.Key] = Math.Exp(_weigthExpValue * (1 - f_idf));
+            }
+
+            #endregion
+
+            #region Filter features by Weights and create map to sequential Ids
+
+            int index = 0;
+            foreach (var featureId in _featureWeight.Where(x => x.Value >= _exponentialConstant))
+            {
+                _filteredFeatures.Add(featureId.Key, index++);
+            }
+
+            #endregion
+
+            #region Create training set
+
+            _trainingData = ReadUniqueVouchers(vouchers);
+
+            #endregion
+        }
+
+        public List<Tuple<int, double>> ReadWeightedFeatures(List<string> ocrFeatures)
+        {
+            return ExpandFeatures(ocrFeatures).Select(x => new Tuple<int, double>(_filteredFeatures[x.Item1], x.Item2)).ToList();
+        }
+
+        public List<int> ReadFeatures()
+        {
+            return _featureById.Where(x => _featureWeight[x.Key] >= _exponentialConstant).Select(x => _filteredFeatures[x.Key]).ToList();
+        }
+
+        #endregion
+
+        List<VoucherWeightedFeatures> ReadUniqueVouchers(IEnumerable<Voucher> vouchers)
+        {
+            object sync = new object();
+            List<VoucherWeightedFeatures> ret = new List<VoucherWeightedFeatures>();
+            Dictionary<VoucherFeatures, Voucher> unique = new Dictionary<VoucherFeatures, Voucher>();
+
+            Parallel.ForEach<Voucher>(vouchers, // source collection
+                                   (voucher) => // method invoked by the loop on each iteration
+                                   {
+                                       var features = ReadWeightedFeatures(voucher.OcrFeatures.ToList());
+                                       var vFeatures = new VoucherFeatures { Features = features };
+
+                                       lock (sync)
+                                       {
+                                           if (features.Count > 0)
+                                           {
+                                               if (unique.ContainsKey(vFeatures))
+                                               {
+                                                   // check if vouchers are equal
+                                                   var matchVoucher = unique[vFeatures];
+                                                   if (!matchVoucher.TagName.Equals(voucher.TagName))
+                                                   {
+                                                       ret.Add(new VoucherWeightedFeatures { Voucher = voucher, WeightedFeatures = features });
+                                                       // the same voucher identifiers multiple categories
+                                                       //matchVoucher.TagName += "," + voucher.TagName;
+                                                   }
+                                               }
+                                               else
+                                               {
+                                                   ret.Add(new VoucherWeightedFeatures { Voucher = voucher, WeightedFeatures = features });
+                                                   unique.Add(vFeatures, voucher);
+                                               }
+                                           }
+                                       }
+
+                                   });
+
+
+            return ret;
+        }
+
+        List<Tuple<int, double>> ExpandFeatures(List<string> ocrFeatures)
+        {
+            List<Tuple<int, double>> features = ocrFeatures.SelectMany(f =>
+            {
+                Dictionary<int, double> matches = new Dictionary<int, double>();
+                List<string> ngrams = MakeNGram(f);
+                foreach (var bg in ngrams.GroupBy(x => x))
+                {
+                    if (IsNGramValid(bg.Key) && _bgrams.ContainsKey(bg.Key))
+                    {
+                        foreach (var x in _bgrams[bg.Key])
+                        {
+                            if (matches.ContainsKey(x.Key))
+                            {
+                                matches[x.Key] += Math.Min(x.Value, bg.Count());
+                            }
+                            else
+                            {
+                                matches.Add(x.Key, Math.Min(x.Value, bg.Count()));
+                            }
+                        }
+                    }
+                }
+                var ret = matches
+                    .Select(x => new Tuple<int, double>(x.Key, x.Value / ((_featureById[x.Key].Length - _ngram + 3) + ngrams.Count - x.Value)))
+                    .Where(x => x.Item2 >= _similiarityThreshold && _featureWeight[x.Item1] >= _exponentialConstant)
+                    .GroupBy(x => x.Item1)
+                    .Select(x => new Tuple<int, double>(x.Key, _featureWeight[x.Key]))
+                    .ToList();
+
+                return ret;
+
+            }).Distinct().ToList();
+
+            return features;
+        }
+    }
+}
