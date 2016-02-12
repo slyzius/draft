@@ -326,6 +326,9 @@ namespace WindowsFormsApplication1
 
             _posterior = new Dictionary<string, double>();
             ReadFile<string, double>(binaryReader, _posterior, deserialize_string, deserialize_double);
+
+            _featuresCount = new Dictionary<string, int>();
+            ReadFile<string, int>(binaryReader, _featuresCount, deserialize_string, deserialize_int);
         }
 
         static void ReadFile<TKey, TValue>(BinaryReader reader, Dictionary<TKey, TValue> dict, Func<BinaryReader, TKey> deserializeKey, Func<BinaryReader, TValue> deserializeValue)
@@ -379,6 +382,7 @@ namespace WindowsFormsApplication1
             WriteFile<int, Dictionary<string, double>>(binaryWriter, _categUserLikellihood, serialize_int, serialize_dictionary_string_double);
             WriteFile<int, double>(binaryWriter, _userPrior, serialize_int, serialize_double);
             WriteFile<string, double>(binaryWriter, _posterior, serialize_string, serialize_double);
+            WriteFile<string, int>(binaryWriter, _featuresCount, serialize_string, serialize_int);
         }
 
         static void WriteFile<TKey, TValue>(BinaryWriter writer, Dictionary<TKey, TValue> dict, Action<TKey, BinaryWriter> serializeKey, Action<TValue, BinaryWriter> serializeValue)
