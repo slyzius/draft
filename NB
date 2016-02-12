@@ -16,7 +16,7 @@ namespace WindowsFormsApplication1
         /// <summary>
         /// Current version
         /// </summary>
-        int Version = 101;
+        int Version = 102;
 
         /// <summary>
         /// Feature managers' unique id.
@@ -37,6 +37,11 @@ namespace WindowsFormsApplication1
         /// Conditional probability of a particular feature belongs to category
         /// </summary>
         Dictionary<string, Dictionary<int,double>> _featureLikellihood;
+
+        /// <summary>
+        /// Sum_ForEach_Feature( Count of number of Vouchers per feature)
+        /// </summary>
+        Dictionary<string, int> _featuresCount;
 
         /// <summary>
         /// Conditional probability of user choosing particular category
@@ -96,29 +101,54 @@ namespace WindowsFormsApplication1
 
             var vouchers = _ftm.TrainingData;
 
-            _categCounts = vouchers.GroupBy(x => x.Voucher.TagName).ToDictionary(x => x.Key, x => x.Count());
-
-            // compute likellihood of feature given category(tag)
-            var tagToFeaturesToVouchers = vouchers.GroupBy(g => g.Voucher.TagName)
-                .ToDictionary(x => x.Key, x =>
-                    x.SelectMany(y => y.WeightedFeatures).GroupBy(y => y.Item1).ToDictionary(z => z.Key, z => z.Count()));
+            //================ Compute conditional probabilities (likellihood) for Feature given Category =================================//
+            //p(F1|Categ) = Count of number of Vouchers per feature F1 + 1 /  Sum_ForEach_Feature( Count of number of Vouchers per feature Fx + 1)
+            //  (.. + 1) - it is smoothing to account for missing features per category
             
-            var tagToFeatures = tagToFeaturesToVouchers.ToDictionary(x => x.Key, x => x.Value.Sum(y => y.Value));
+            //  create a dictionary for each category containing a list of features with feature counts per category         
+            var categToFeaturesCounts = vouchers.GroupBy(g => g.Voucher.TagName)
+                .ToDictionary(x => x.Key, x =>
+                    x.SelectMany(y => y.WeightedFeatures)
+                        .GroupBy(y => y.Item1)
+                        .ToDictionary(z => z.Key, z => z.Count()));
 
-            _featureLikellihood = tagToFeaturesToVouchers
+            // create a dictionary of features count per category
+            // this is this part: Sum_ForEach_Feature( Count of number of Vouchers per feature)
+            _featuresCount = categToFeaturesCounts.ToDictionary(x => x.Key, x => x.Value.Sum(y => y.Value));
+
+            // p(F1|Categ)
+            _featureLikellihood = categToFeaturesCounts
                 .ToDictionary(x => x.Key, x => x.Value
-                    .ToDictionary(y => y.Key, y => ((double)y.Value + 1) / (tagToFeatures[x.Key] + _ftm.NumberOfValidFeatures)));
+                    .ToDictionary(y => y.Key, y => ((double)y.Value + 1) / (_featuresCount[x.Key] + _ftm.NumberOfValidFeatures)));
+            //=========================================================================================================================//
 
-            // user per category likellihood: p(categ,user) = p(categ|user)*p(user)
+            //================ Compute conditional probabilities (likellihood) for Category given User =================================//
+            // user per category likellihood: p(Categ, User) = p(Categ|User) * p(User)
+            // p(user) - can be ignored in prediction, since prediction is done per user
+
             int totalVouchers = vouchers.Count;
             int totalUsers = vouchers.Select(x => x.Voucher.OrganizationId).Distinct().Count();
+
+            // userPrior = Count number of Voucher per User + 1 / Sum_Foreach_user(Count number of Voucher per User + 1)
+            // ,where
+            // Sum_Foreach_user(Count number of Voucher per User) => totalVouchers  (because Voucher belongs to only one user)
+            // Sum_Foreach_user(1) => number Of Users
             _userPrior = vouchers.GroupBy(x => x.Voucher.OrganizationId).ToDictionary(x => x.Key, x => ((double)x.Count() + 1) / (totalVouchers + totalUsers));
 
-            _categUserLikellihood = vouchers.GroupBy(g => g.Voucher.OrganizationId)
-                .ToDictionary(x => x.Key, x => x.GroupBy(y => y.Voucher.TagName).ToDictionary(y => y.Key, y => ((double)y.Count() + 1) / (_categCounts[y.Key] + totalUsers)));
+            // number of vouchers per category
+            _categCounts = vouchers.GroupBy(x => x.Voucher.TagName).ToDictionary(x => x.Key, x => x.Count());
 
-            // make general posteriors
-            _posterior = _featureLikellihood.ToDictionary(x=>x.Key,x=>0.0);
+            // userCategLikellihood = Count number of Category Voucher per User +1 / Sum_Foreach_user(Count number of Category Voucher per User + 1)
+            _categUserLikellihood = vouchers.GroupBy(g => g.Voucher.OrganizationId)
+                .ToDictionary(x => x.Key, x => 
+                    x.GroupBy(y => y.Voucher.TagName)
+                    .ToDictionary(y => y.Key, y => ((double)y.Count() + 1) / (_categCounts[y.Key] + totalUsers)));
+
+            // precompute posterior for each category 
+            // as described in definition, this is just a performance optimization:
+            // first we precalculate "aka" posteriors per category and during prediction
+            // alter posterior with test document features and add user category likellihood
+            _posterior = _featureLikellihood.ToDictionary(x=>x.Key, x=>0.0);
 
             foreach (var category in _featureLikellihood)
             {
@@ -135,11 +165,13 @@ namespace WindowsFormsApplication1
                     {
                         // feature is not used in category
                         // therefore apply unknown feature likellihood
-                        likellihood = 1.0 / (category.Value.Count + _ftm.NumberOfValidFeatures + 1);
+                        likellihood = 1.0 / (_featuresCount[category.Key] + _ftm.NumberOfValidFeatures + 1);
                     }
                     _posterior[category.Key] += Math.Log(1.0 - likellihood);
                 }
             }
+
+            //=========================================================================================================================//
         }
 
         /// <summary>
@@ -181,7 +213,7 @@ namespace WindowsFormsApplication1
                     {
                         // feature is not used in category
                         // therefore apply unknown feature likellihood
-                        likellihood = 1.0 / (category.Value.Count + _ftm.NumberOfValidFeatures + 1);
+                        likellihood = 1.0 / (_featuresCount[category.Key] + _ftm.NumberOfValidFeatures + 1);
                     }
                     posterior[category.Key] += Math.Log(likellihood) - Math.Log(1 - likellihood);
                 }
@@ -191,7 +223,15 @@ namespace WindowsFormsApplication1
             return SelectPreferred(tmp,top);
         }
 
-        private static List<Prediction> SelectPreferred(IEnumerable<Tuple<string, double>> values,int top)
+        /// <summary>
+        /// Makes ZScore distribution of predicted results and filter highest predictions
+        /// The idea is that bigger the variance in the prediction, the higher chance is that the top scored
+        /// results will be right
+        /// </summary>
+        /// <param name="values"></param>
+        /// <param name="top"></param>
+        /// <returns></returns>
+        private List<Prediction> SelectPreferred(IEnumerable<Tuple<string, double>> values,int top)
         {
             Func<double, PredictionConfidence> getConfidence = (zscore) =>
             {
@@ -217,7 +257,9 @@ namespace WindowsFormsApplication1
                 .Where(x => x.ConfidenceLevel == PredictionConfidence.High || x.ConfidenceLevel == PredictionConfidence.Medium)
                 .Take(top)
                 .ToList()
-                : values.Select(x => new Prediction { Tag = x.Item1, ConfidenceLevel = PredictionConfidence.Medium, Score = 1 }).Take(top).ToList();
+                :
+                // when no variance exists, we are a bit in a dilemma. It might be a few categories that precisely describes the test voucher, or, just a garbage result.
+                (values.Count() <= top) ? values.Select(x => new Prediction { Tag = x.Item1, ConfidenceLevel = PredictionConfidence.Medium, Score = x.Item2 }).Take(top).ToList() : new List<Prediction>();    
         }
 
 #region serialize
