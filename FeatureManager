@@ -1,5 +1,6 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -74,13 +75,12 @@ namespace WindowsFormsApplication1
         /// <summary>
         /// Current version
         /// </summary>
-        int Version = 101;
+        int Version = 102;
 
         /// <summary>
         /// Stores unique vouchers to pass to models to train
         /// </summary>
-        List<VoucherWeightedFeatures> _trainingData;
-        public List<VoucherWeightedFeatures> TrainingData { get { return _trainingData; } }
+        public List<VoucherWeightedFeatures> TrainingData { get; private set; }
 
         /// <summary>
         /// when features are filtered by weights, we need to make sure those features is sequentually ordered (0,1,2,3,4,5,6,7,8,...)
@@ -217,10 +217,10 @@ namespace WindowsFormsApplication1
 
                     // read OCR features
                     int nOcr = reader.ReadInt32();
-                    //voucher.OcrFeatures = new List<string>();
+                    voucher.OcrFeatures = new List<string>();
                     for (int y = 0; y < nOcr; y++)
                     {
-                        //voucher.OcrFeatures.Add(reader.ReadString());
+                        voucher.OcrFeatures.Add(reader.ReadString());
                     }
 
                     var features = new List<Tuple<int, double>>();
@@ -242,7 +242,7 @@ namespace WindowsFormsApplication1
                 throw new InvalidOperationException("File is not compatible");
             }
             SerializationId = deserialize_guid(binaryReader);
-            _trainingData = deserialize_list_VoucherWeightedFeatures(binaryReader);
+            TrainingData = deserialize_list_VoucherWeightedFeatures(binaryReader);
 
             ReadFile<int, int>(binaryReader, _filteredFeatures, deserialize_int, deserialize_int);
             ReadFile<int, double>(binaryReader, _featureWeight, deserialize_int, deserialize_double);
@@ -332,7 +332,7 @@ namespace WindowsFormsApplication1
 
             serialize_int(Version, binaryWriter);
             serialize_guid(SerializationId, binaryWriter);
-            serialize_list_VoucherWeightedFeatures(_trainingData, binaryWriter);
+            serialize_list_VoucherWeightedFeatures(TrainingData, binaryWriter);
 
             WriteFile<int, int>(binaryWriter, _filteredFeatures, serialize_int, serialize_int);
             WriteFile<int, double>(binaryWriter, _featureWeight, serialize_int, serialize_double);
@@ -435,20 +435,23 @@ namespace WindowsFormsApplication1
                         Buffer.BlockCopy(bg, 0, result, 0, result.Length);
                         var bgString = System.Text.UnicodeEncoding.Unicode.GetString(result);
 
-                        if (bgrams.ContainsKey(bgString))
+                        if (IsNGramValid(bgString))
                         {
-                            if (bgrams[bgString].ContainsKey(iword))
+                            if (bgrams.ContainsKey(bgString))
                             {
-                                bgrams[bgString][iword]++;
+                                if (bgrams[bgString].ContainsKey(iword))
+                                {
+                                    bgrams[bgString][iword]++;
+                                }
+                                else
+                                {
+                                    bgrams[bgString].Add(iword, 1);
+                                }
                             }
                             else
                             {
-                                bgrams[bgString].Add(iword, 1);
+                                bgrams.Add(bgString, new Dictionary<int, int> { { iword, 1 } });
                             }
-                        }
-                        else
-                        {
-                            bgrams.Add(bgString, new Dictionary<int, int> { { iword, 1 } });
                         }
                     }
 
@@ -476,44 +479,61 @@ namespace WindowsFormsApplication1
             };
 
             Parallel.ForEach<KeyValuePair<int, string>, List<Tuple<int, int, double>>>(invWords, // source collection
+                                    //new ParallelOptions { MaxDegreeOfParallelism = 1},  
                                     () => new List<Tuple<int, int, double>>(), // method to initialize the local variable
-                                    (words, loop, similiarities) => // method invoked by the loop on each iteration
+                                    (word, loop, similiarities) => // method invoked by the loop on each iteration
                                     {
+                                        double checkingThreshold = Math.Floor(_similiarityThreshold * word.Value.Length);
                                         Dictionary<int, double> matches = new Dictionary<int, double>();
-                                        List<string> ngrams = MakeNGram(words.Value);
+                                        List<string> ngrams = MakeNGram(word.Value);
                                         foreach (var bg in ngrams.GroupBy(x => x))
                                         {
-                                            if (IsNGramValid(bg.Key) && bgrams.ContainsKey(bg.Key))
+                                            if (bgrams.ContainsKey(bg.Key))
                                             {
                                                 foreach (var x in bgrams[bg.Key])
                                                 {
+                                                    double m = Math.Min(x.Value, bg.Count());
                                                     if (matches.ContainsKey(x.Key))
                                                     {
-                                                        matches[x.Key] += Math.Min(x.Value, bg.Count());
+                                                        m += matches[x.Key];
                                                     }
-                                                    else
+
+                                                    if (word.Key != x.Key)
                                                     {
-                                                        matches.Add(x.Key, Math.Min(x.Value, bg.Count()));
+                                                        if (m >= checkingThreshold)
+                                                        {
+                                                            double sim = m / (invWords[x.Key].Length + ngrams.Count - m);
+                                                            if (sim >= _similiarityThreshold)
+                                                            {
+                                                                similiarities.Add(new Tuple<int, int, double>(word.Key, x.Key, sim));
+                                                                matches.Remove(x.Key);
+                                                                continue;
+                                                            }
+                                                        }
+                                                        matches[x.Key] = m;
                                                     }
                                                 }
                                             }
                                         }
-                                        var ret = matches
-                                            .Where(x => words.Key != x.Key)
-                                            .Select(x => new Tuple<int, int, double>(words.Key, x.Key, x.Value / ((invWords[x.Key].Length - _ngram + 3) + ngrams.Count - x.Value)))
+                                        /*var ret = matches
+                                            .Where(x => word.Key != x.Key)
+                                            .Select(x => new Tuple<int, int, double>(word.Key, x.Key, x.Value / ((invWords[x.Key].Length - _ngram + 3) + ngrams.Count - x.Value)))
                                             .Where(x => x.Item3 >= _similiarityThreshold)
                                             .ToList();
 
-                                        ret.ForEach(x => similiarities.Add(x));
+                                        ret.ForEach(x =>
+                                            {
+                                                if (!similiarities.Exists(y => y.Item2 == x.Item2))
+                                                    throw new Exception("xxzx");
+                                            });
+                                        
+                                        ret.ForEach(x => similiarities.Add(x));*/
                                         return similiarities; // value to be passed to next iteration
                                     },
-                // Method to be executed when each partition has completed.
-                // finalResult is the final value of subtotal for a particular partition.
+                                    // Method to be executed when each partition has completed.
+                                    // finalResult is the final value of subtotal for a particular partition.
                                     (finalResult) => mergeSimiliarities(finalResult)
                                     );
-
-
-
 
             #endregion
 
@@ -522,20 +542,20 @@ namespace WindowsFormsApplication1
             APClustering apCluster = new APClustering { Lam = 0.5, InvWords = invWords, Similiarities = similiaritiesMerged };
             apCluster.Cluster();
 
-            invWords.ToList().ForEach(x =>
+            // add words that has no similiarities with any word, and, therefore is not part of any cluster
+            foreach(var x in invWords)
             {
                 // check if data point
                 if (!apCluster.Word2Cluster.ContainsKey(x.Key) && wordFrequency[x.Key] > 1)
                 {
                     List<string> ngrams = MakeNGram(x.Value);
                     double match = ((double)ngrams.Where(w => IsNGramValid(w)).Count()) / x.Value.Length;
-                    if (match >= 0.7)
+                    if (match >= 2.0 / 3)
                     {
                         apCluster.Word2Cluster.Add(x.Key, x.Key);
                     }
                 }
-            });
-
+            }
 
             #endregion
 
@@ -566,20 +586,23 @@ namespace WindowsFormsApplication1
                         Buffer.BlockCopy(bg, 0, result, 0, result.Length);
                         var bgString = System.Text.UnicodeEncoding.Unicode.GetString(result);
 
-                        if (_bgrams.ContainsKey(bgString))
+                        if (IsNGramValid(bgString))
                         {
-                            if (_bgrams[bgString].ContainsKey(ifeature))
+                            if (_bgrams.ContainsKey(bgString))
                             {
-                                _bgrams[bgString][ifeature]++;
+                                if (_bgrams[bgString].ContainsKey(ifeature))
+                                {
+                                    _bgrams[bgString][ifeature]++;
+                                }
+                                else
+                                {
+                                    _bgrams[bgString].Add(ifeature, 1);
+                                }
                             }
                             else
                             {
-                                _bgrams[bgString].Add(ifeature, 1);
+                                _bgrams.Add(bgString, new Dictionary<int, int> { { ifeature, 1 } });
                             }
-                        }
-                        else
-                        {
-                            _bgrams.Add(bgString, new Dictionary<int, int> { { ifeature, 1 } });
                         }
                     }
 
@@ -613,12 +636,11 @@ namespace WindowsFormsApplication1
             };
 
             Parallel.ForEach<Voucher, Dictionary<int, List<Voucher>>>(vouchers, // source collection
+                //new ParallelOptions { MaxDegreeOfParallelism = 1},  
                                     () => new Dictionary<int, List<Voucher>>(), // method to initialize the local variable
                                     (voucher, loop, partfeature2Vouchers) => // method invoked by the loop on each iteration
                                     {
-                                        List<Tuple<int, double>> features = ExpandFeatures(voucher.OcrFeatures.ToList());
-
-                                        features.ForEach(x =>
+                                        foreach(var x in ExpandFeatures(voucher.OcrFeatures.ToList()))
                                         {
                                             if (partfeature2Vouchers.ContainsKey(x.Item1))
                                             {
@@ -628,7 +650,7 @@ namespace WindowsFormsApplication1
                                             {
                                                 partfeature2Vouchers.Add(x.Item1, new List<Voucher> { voucher });
                                             }
-                                        });
+                                        }
                                         return partfeature2Vouchers; // value to be passed to next iteration
                                     },
                 // Method to be executed when each partition has completed.
@@ -663,7 +685,7 @@ namespace WindowsFormsApplication1
 
             #region Create training set
 
-            _trainingData = ReadUniqueVouchers(vouchers);
+            TrainingData = ReadUniqueVouchers(vouchers);
 
             #endregion
         }
@@ -679,6 +701,29 @@ namespace WindowsFormsApplication1
         }
 
         #endregion
+
+        /*List<VoucherWeightedFeatures> CreateTrainingData(IEnumerable<Voucher> vouchers)
+        {
+            object sync = new object();
+            List<VoucherWeightedFeatures> ret = new List<VoucherWeightedFeatures>();
+
+            Parallel.ForEach<Voucher>(vouchers, // source collection
+                                   (voucher) => // method invoked by the loop on each iteration
+                                   {
+                                       var features = ReadWeightedFeatures(voucher.OcrFeatures.ToList());
+
+                                       lock (sync)
+                                       {
+                                           if (features.Count > 0)
+                                           {
+                                               ret.Add(new VoucherWeightedFeatures { Voucher = voucher, WeightedFeatures = features });
+                                           }
+                                       }
+
+                                   });
+
+            return ret;
+        }*/
 
         List<VoucherWeightedFeatures> ReadUniqueVouchers(IEnumerable<Voucher> vouchers)
         {
@@ -721,39 +766,55 @@ namespace WindowsFormsApplication1
             return ret;
         }
 
-        List<Tuple<int, double>> ExpandFeatures(List<string> ocrFeatures)
+        IEnumerable<Tuple<int, double>> ExpandFeatures(List<string> ocrFeatures)
         {
-            List<Tuple<int, double>> features = ocrFeatures.SelectMany(f =>
+            IEnumerable<Tuple<int, double>> features = ocrFeatures.Distinct().SelectMany(f =>
             {
+                double checkingThreshold = Math.Floor(_similiarityThreshold * f.Length);
+                List<Tuple<int, double>> matchFeatures = new List<Tuple<int, double>>();
                 Dictionary<int, double> matches = new Dictionary<int, double>();
                 List<string> ngrams = MakeNGram(f);
                 foreach (var bg in ngrams.GroupBy(x => x))
                 {
-                    if (IsNGramValid(bg.Key) && _bgrams.ContainsKey(bg.Key))
+                    if (_bgrams.ContainsKey(bg.Key))
                     {
                         foreach (var x in _bgrams[bg.Key])
                         {
+                            double m = Math.Min(x.Value, bg.Count());
                             if (matches.ContainsKey(x.Key))
                             {
-                                matches[x.Key] += Math.Min(x.Value, bg.Count());
+                                m += matches[x.Key];
                             }
-                            else
+
+                            if (m >= checkingThreshold)
                             {
-                                matches.Add(x.Key, Math.Min(x.Value, bg.Count()));
+                                double sim = m / (_featureById[x.Key].Length + ngrams.Count - m);
+                                if (sim >= _similiarityThreshold)
+                                {
+                                    if (_featureWeight[x.Key] >= _exponentialConstant)
+                                    {
+                                        matchFeatures.Add(new Tuple<int, double>(x.Key, _featureWeight[x.Key]));
+                                    }
+                                    matches.Remove(x.Key);
+                                    continue;
+                                }
                             }
+                            matches[x.Key] = m;
                         }
                     }
                 }
-                var ret = matches
+                /*var ret = matches
                     .Select(x => new Tuple<int, double>(x.Key, x.Value / ((_featureById[x.Key].Length - _ngram + 3) + ngrams.Count - x.Value)))
                     .Where(x => x.Item2 >= _similiarityThreshold && _featureWeight[x.Item1] >= _exponentialConstant)
                     .GroupBy(x => x.Item1)
                     .Select(x => new Tuple<int, double>(x.Key, _featureWeight[x.Key]))
                     .ToList();
 
-                return ret;
+                return ret;*/
 
-            }).Distinct().ToList();
+                return matchFeatures;
+
+            }).Distinct();
 
             return features;
         }
