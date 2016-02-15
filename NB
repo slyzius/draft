@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -16,12 +16,12 @@ namespace WindowsFormsApplication1
         /// <summary>
         /// Current version
         /// </summary>
-        int Version = 102;
+        int Version = 103;
 
         /// <summary>
         /// Feature managers' unique id.
         /// </summary>
-        Guid FeatureSerializationId{ get; set; }
+        Guid FeatureSerializationId { get; set; }
 
         /// <summary>
         /// Training features
@@ -29,14 +29,9 @@ namespace WindowsFormsApplication1
         FeatureManager _ftm;
 
         /// <summary>
-        /// number of vouchers per category
-        /// </summary>
-        Dictionary<string, int> _categCounts;
-
-        /// <summary>
         /// Conditional probability of a particular feature belongs to category
         /// </summary>
-        Dictionary<string, Dictionary<int,double>> _featureLikellihood;
+        Dictionary<string, Dictionary<int, double>> _featureLikellihood;
 
         /// <summary>
         /// Sum_ForEach_Feature( Count of number of Vouchers per feature)
@@ -44,14 +39,19 @@ namespace WindowsFormsApplication1
         Dictionary<string, int> _featuresCount;
 
         /// <summary>
+        /// number of vouchers per user + number of categories known by user
+        /// </summary>
+        Dictionary<int, int> _userCategCounts;
+
+        /// <summary>
         /// Conditional probability of user choosing particular category
         /// </summary>
         Dictionary<int, Dictionary<string, double>> _categUserLikellihood;
 
         /// <summary>
-        /// User prior probability. (not really used)
+        /// Category prior probability
         /// </summary>
-        Dictionary<int, double> _userPrior;
+        Dictionary<string, double> _categPrior;
 
         /// <summary>
         /// For performance reasons, precalculate for each category posteriors when all features is missing in test voucher
@@ -69,7 +69,7 @@ namespace WindowsFormsApplication1
         /// </summary>
         /// <param name="file"></param>
         /// <param name="ftm"></param>
-        public void Load(string file,  FeatureManager ftm)
+        public void Load(string file, FeatureManager ftm)
         {
             _ftm = ftm;
 
@@ -88,25 +88,48 @@ namespace WindowsFormsApplication1
                 Write(writer);
             }
         }
-        
+
         /// <summary>
-        /// Train model
+        /// Train posteriors: p(Categ), p(User,Categ)
+        /// </summary>
+        /// <param name="vouchers"></param>
+        public void TrainUserPreference(IEnumerable<Voucher> vouchers)
+        {
+            // Compute conditional probabilities (likellihood) for Category given User:
+            // user per category likellihood: p(Categ, User) = p(Categ|User) * p(User)
+            // p(user) - can be ignored in prediction, since prediction is done per user
+
+            // category probabilities
+            _categPrior = vouchers.GroupBy(x => x.TagName).ToDictionary(x => x.Key, x => ((double)x.Count() + 1) / vouchers.Count());
+
+            // number of vouchers per user ( aka count vouchers per category ) plus number of categories
+            _userCategCounts = vouchers
+                .GroupBy(g => g.OrganizationId)
+                .ToDictionary(x => x.Key, x => x.Count() + x.GroupBy(y => y.TagName).Count());
+
+            // userCategLikellihood = Count number of Category Voucher per User +1 / Sum_Foreach_Category(Count number of Category Voucher per User + 1)
+            _categUserLikellihood = vouchers.GroupBy(g => g.OrganizationId)
+                .ToDictionary(x => x.Key, x =>
+                    x.GroupBy(y => y.TagName)
+                    .ToDictionary(y => y.Key, y => ((double)y.Count() + 1) / _userCategCounts[x.Key]));
+        }
+
+        /// <summary>
+        /// Train model for selecting categories based on features
         /// </summary>
         /// <param name="ftm"></param>
-        public void Train(FeatureManager ftm)
+        public void TrainFeatures(FeatureManager ftm)
         {
             _ftm = ftm;
-
             FeatureSerializationId = _ftm.SerializationId;
 
-            var vouchers = _ftm.TrainingData;
-
-            //================ Compute conditional probabilities (likellihood) for Feature given Category =================================//
+            //Compute conditional probabilities (likellihood) for Feature given Category:
             //p(F1|Categ) = Count of number of Vouchers per feature F1 + 1 /  Sum_ForEach_Feature( Count of number of Vouchers per feature Fx + 1)
             //  (.. + 1) - it is smoothing to account for missing features per category
-            
-            //  create a dictionary for each category containing a list of features with feature counts per category         
-            var categToFeaturesCounts = vouchers.GroupBy(g => g.Voucher.TagName)
+
+            //  create a dictionary for each category containing a list of features with feature counts per category   
+            var trainingData = ftm.TrainingData;
+            var categToFeaturesCounts = trainingData.GroupBy(g => g.Voucher.TagName)
                 .ToDictionary(x => x.Key, x =>
                     x.SelectMany(y => y.WeightedFeatures)
                         .GroupBy(y => y.Item1)
@@ -116,40 +139,17 @@ namespace WindowsFormsApplication1
             // this is this part: Sum_ForEach_Feature( Count of number of Vouchers per feature)
             _featuresCount = categToFeaturesCounts.ToDictionary(x => x.Key, x => x.Value.Sum(y => y.Value));
 
-            // p(F1|Categ)
+            // p(Fx|Categ)
             _featureLikellihood = categToFeaturesCounts
                 .ToDictionary(x => x.Key, x => x.Value
                     .ToDictionary(y => y.Key, y => ((double)y.Value + 1) / (_featuresCount[x.Key] + _ftm.NumberOfValidFeatures)));
-            //=========================================================================================================================//
 
-            //================ Compute conditional probabilities (likellihood) for Category given User =================================//
-            // user per category likellihood: p(Categ, User) = p(Categ|User) * p(User)
-            // p(user) - can be ignored in prediction, since prediction is done per user
 
-            int totalVouchers = vouchers.Count;
-            int totalUsers = vouchers.Select(x => x.Voucher.OrganizationId).Distinct().Count();
-
-            // userPrior = Count number of Voucher per User + 1 / Sum_Foreach_user(Count number of Voucher per User + 1)
-            // ,where
-            // Sum_Foreach_user(Count number of Voucher per User) => totalVouchers  (because Voucher belongs to only one user)
-            // Sum_Foreach_user(1) => number Of Users
-            _userPrior = vouchers.GroupBy(x => x.Voucher.OrganizationId).ToDictionary(x => x.Key, x => ((double)x.Count() + 1) / (totalVouchers + totalUsers));
-
-            // number of vouchers per category
-            _categCounts = vouchers.GroupBy(x => x.Voucher.TagName).ToDictionary(x => x.Key, x => x.Count());
-
-            // userCategLikellihood = Count number of Category Voucher per User +1 / Sum_Foreach_user(Count number of Category Voucher per User + 1)
-            _categUserLikellihood = vouchers.GroupBy(g => g.Voucher.OrganizationId)
-                .ToDictionary(x => x.Key, x => 
-                    x.GroupBy(y => y.Voucher.TagName)
-                    .ToDictionary(y => y.Key, y => ((double)y.Count() + 1) / (_categCounts[y.Key] + totalUsers)));
-
-            // precompute posterior for each category 
+            // Precompute posterior for each category:
             // as described in definition, this is just a performance optimization:
             // first we precalculate "aka" posteriors per category and during prediction
             // alter posterior with test document features and add user category likellihood
-            _posterior = _featureLikellihood.ToDictionary(x=>x.Key, x=>0.0);
-
+            _posterior = _featureLikellihood.ToDictionary(x => x.Key, x => 0.0);
             foreach (var category in _featureLikellihood)
             {
                 foreach (var featureId in _ftm.ReadFeatures())
@@ -170,8 +170,6 @@ namespace WindowsFormsApplication1
                     _posterior[category.Key] += Math.Log(1.0 - likellihood);
                 }
             }
-
-            //=========================================================================================================================//
         }
 
         /// <summary>
@@ -186,18 +184,27 @@ namespace WindowsFormsApplication1
             var features = _ftm.ReadWeightedFeatures(ocrFeatures).ToDictionary(x => x.Item1, x => 0);
 
             Dictionary<string, int> selectedFeatures = _posterior.ToDictionary(x => x.Key, x => 0);
-            Dictionary<string, double> posterior = _posterior.ToDictionary(x=>x.Key, x=>x.Value);
+            Dictionary<string, double> posterior = _posterior.ToDictionary(x => x.Key, x => x.Value);
 
             foreach (var category in _featureLikellihood)
             {
-                if (_categUserLikellihood.ContainsKey(organizationId) && _categUserLikellihood[organizationId].ContainsKey(category.Key))
+                // set priori p(categ|user)
+                // if we don't know the user we set p(categ)
+                if (_categUserLikellihood.ContainsKey(organizationId))
                 {
-                    posterior[category.Key] += Math.Log(_categUserLikellihood[organizationId][category.Key]);
+                    if (_categUserLikellihood[organizationId].ContainsKey(category.Key))
+                    {
+                        posterior[category.Key] += Math.Log(_categUserLikellihood[organizationId][category.Key]);
+                    }
+                    else
+                    {
+                        var unknownLikellihood = 1.0 / (_userCategCounts[organizationId] + 1);
+                        posterior[category.Key] += Math.Log(unknownLikellihood);
+                    }
                 }
                 else
                 {
-                    var unknownLikellihood = 1.0 / (_categCounts[category.Key] + _userPrior.Count + 1);
-                    posterior[category.Key] += Math.Log(unknownLikellihood);
+                    posterior[category.Key] += Math.Log(_categPrior[category.Key]);
                 }
 
                 foreach (var feature in features)
@@ -218,9 +225,9 @@ namespace WindowsFormsApplication1
                     posterior[category.Key] += Math.Log(likellihood) - Math.Log(1 - likellihood);
                 }
             }
-            
-            var tmp = posterior.Where(x => selectedFeatures[x.Key] > 0).Select(x => new Tuple<string, double>(x.Key, x.Value)).OrderByDescending(x => x.Item2).Take(top* 2).ToList();
-            return SelectPreferred(tmp,top);
+
+            var tmp = posterior.Where(x => selectedFeatures[x.Key] > 0).Select(x => new Tuple<string, double>(x.Key, x.Value)).OrderByDescending(x => x.Item2).Take(top * 2).ToList();
+            return SelectPreferred(tmp, top);
         }
 
         /// <summary>
@@ -231,7 +238,7 @@ namespace WindowsFormsApplication1
         /// <param name="values"></param>
         /// <param name="top"></param>
         /// <returns></returns>
-        private List<Prediction> SelectPreferred(IEnumerable<Tuple<string, double>> values,int top)
+        private List<Prediction> SelectPreferred(IEnumerable<Tuple<string, double>> values, int top)
         {
             Func<double, PredictionConfidence> getConfidence = (zscore) =>
             {
@@ -239,7 +246,7 @@ namespace WindowsFormsApplication1
                 {
                     return PredictionConfidence.High;
                 }
-                else if (zscore >= 0.4)
+                else if (zscore >= 0)
                 {
                     return PredictionConfidence.Medium;
                 }
@@ -259,10 +266,10 @@ namespace WindowsFormsApplication1
                 .ToList()
                 :
                 // when no variance exists, we are a bit in a dilemma. It might be a few categories that precisely describes the test voucher, or, just a garbage result.
-                (values.Count() <= top) ? values.Select(x => new Prediction { Tag = x.Item1, ConfidenceLevel = PredictionConfidence.Medium, Score = x.Item2 }).Take(top).ToList() : new List<Prediction>();    
+                (values.Count() <= top) ? values.Select(x => new Prediction { Tag = x.Item1, ConfidenceLevel = PredictionConfidence.Medium, Score = x.Item2 }).Take(top).ToList() : new List<Prediction>();
         }
 
-#region serialize
+        #region serialize
 
         public void Read(BinaryReader binaryReader)
         {
@@ -299,7 +306,7 @@ namespace WindowsFormsApplication1
             {
                 return Guid.Parse(reader.ReadString());
             };
-            
+
             int version = deserialize_int(binaryReader);
             if (Version != version)
             {
@@ -312,17 +319,17 @@ namespace WindowsFormsApplication1
                 throw new InvalidOperationException("Version of Feature Manager file is not compatible with Model file.");
             }
 
-            _categCounts = new Dictionary<string,int>();
-            ReadFile<string, int>(binaryReader, _categCounts, deserialize_string, deserialize_int);
-            
-            _featureLikellihood = new Dictionary<string,Dictionary<int,double>>();
-            ReadFile<string,Dictionary<int,double>>(binaryReader, _featureLikellihood, deserialize_string, deserialize_dictionary_int_double);
+            _userCategCounts = new Dictionary<int, int>();
+            ReadFile<int, int>(binaryReader, _userCategCounts, deserialize_int, deserialize_int);
 
-            _categUserLikellihood = new Dictionary<int,Dictionary<string,double>>();
+            _featureLikellihood = new Dictionary<string, Dictionary<int, double>>();
+            ReadFile<string, Dictionary<int, double>>(binaryReader, _featureLikellihood, deserialize_string, deserialize_dictionary_int_double);
+
+            _categUserLikellihood = new Dictionary<int, Dictionary<string, double>>();
             ReadFile<int, Dictionary<string, double>>(binaryReader, _categUserLikellihood, deserialize_int, deserialize_dictionary_string_double);
 
-            _userPrior = new Dictionary<int,double>();
-            ReadFile<int, double>(binaryReader, _userPrior, deserialize_int, deserialize_double);
+            _categPrior = new Dictionary<string, double>();
+            ReadFile<string, double>(binaryReader, _categPrior, deserialize_string, deserialize_double);
 
             _posterior = new Dictionary<string, double>();
             ReadFile<string, double>(binaryReader, _posterior, deserialize_string, deserialize_double);
@@ -375,12 +382,12 @@ namespace WindowsFormsApplication1
                 writer.Write(guid.ToString());
             };
 
-            serialize_int(Version,binaryWriter);
-            serialize_guid(FeatureSerializationId,binaryWriter);
-            WriteFile<string, int>(binaryWriter, _categCounts, serialize_string, serialize_int);
-            WriteFile<string,Dictionary<int,double>>(binaryWriter, _featureLikellihood, serialize_string, serialize_dictionary_int_double);
+            serialize_int(Version, binaryWriter);
+            serialize_guid(FeatureSerializationId, binaryWriter);
+            WriteFile<int, int>(binaryWriter, _userCategCounts, serialize_int, serialize_int);
+            WriteFile<string, Dictionary<int, double>>(binaryWriter, _featureLikellihood, serialize_string, serialize_dictionary_int_double);
             WriteFile<int, Dictionary<string, double>>(binaryWriter, _categUserLikellihood, serialize_int, serialize_dictionary_string_double);
-            WriteFile<int, double>(binaryWriter, _userPrior, serialize_int, serialize_double);
+            WriteFile<string, double>(binaryWriter, _categPrior, serialize_string, serialize_double);
             WriteFile<string, double>(binaryWriter, _posterior, serialize_string, serialize_double);
             WriteFile<string, int>(binaryWriter, _featuresCount, serialize_string, serialize_int);
         }
@@ -397,6 +404,6 @@ namespace WindowsFormsApplication1
             }
         }
 
-#endregion
+        #endregion
     }
 }
