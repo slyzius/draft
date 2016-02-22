@@ -65,6 +65,12 @@ namespace WindowsFormsApplication1
         Dictionary<string, double> _posterior = new Dictionary<string, double>();
 
         /// <summary>
+        /// Stores vouchers for training. We add new vouchers to existing collection when doing
+        /// incremental training
+        /// </summary>
+        public List<VoucherWeightedFeatures> TrainingData { get; private set; }
+
+        /// <summary>
         /// Load model from a file
         /// </summary>
         /// <param name="file"></param>
@@ -72,6 +78,7 @@ namespace WindowsFormsApplication1
         public void Load(string file, FeatureManager ftm)
         {
             _ftm = ftm;
+            FeatureSerializationId = _ftm.SerializationId;
 
             using (FileStream fs = File.OpenRead(file))
             using (BinaryReader reader = new BinaryReader(fs))
@@ -90,86 +97,16 @@ namespace WindowsFormsApplication1
         }
 
         /// <summary>
-        /// Train posteriors: p(Categ), p(User,Categ)
-        /// </summary>
-        /// <param name="vouchers"></param>
-        public void TrainUserPreference(IEnumerable<Voucher> vouchers)
-        {
-            // Compute conditional probabilities (likellihood) for Category given User:
-            // user per category likellihood: p(Categ, User) = p(Categ|User) * p(User)
-            // p(user) - can be ignored in prediction, since prediction is done per user
-
-            // category probabilities
-            _categPrior = vouchers.GroupBy(x => x.TagName).ToDictionary(x => x.Key, x => ((double)x.Count() + 1) / vouchers.Count());
-
-            // number of vouchers per user ( aka count vouchers per category ) plus number of categories
-            _userCategCounts = vouchers
-                .GroupBy(g => g.OrganizationId)
-                .ToDictionary(x => x.Key, x => x.Count() + x.GroupBy(y => y.TagName).Count());
-
-            // userCategLikellihood = Count number of Category Voucher per User +1 / Sum_Foreach_Category(Count number of Category Voucher per User + 1)
-            _categUserLikellihood = vouchers.GroupBy(g => g.OrganizationId)
-                .ToDictionary(x => x.Key, x =>
-                    x.GroupBy(y => y.TagName)
-                    .ToDictionary(y => y.Key, y => ((double)y.Count() + 1) / _userCategCounts[x.Key]));
-        }
-
-        /// <summary>
         /// Train model for selecting categories based on features
         /// </summary>
         /// <param name="ftm"></param>
-        public void TrainFeatures(FeatureManager ftm)
+        public void Train(FeatureManager ftm, IEnumerable<Voucher> vouchers)
         {
             _ftm = ftm;
             FeatureSerializationId = _ftm.SerializationId;
 
-            //Compute conditional probabilities (likellihood) for Feature given Category:
-            //p(F1|Categ) = Count of number of Vouchers per feature F1 + 1 /  Sum_ForEach_Feature( Count of number of Vouchers per feature Fx + 1)
-            //  (.. + 1) - it is smoothing to account for missing features per category
-
-            //  create a dictionary for each category containing a list of features with feature counts per category   
-            var trainingData = ftm.TrainingData;
-            var categToFeaturesCounts = trainingData.GroupBy(g => g.Voucher.TagName)
-                .ToDictionary(x => x.Key, x =>
-                    x.SelectMany(y => y.WeightedFeatures)
-                        .GroupBy(y => y.Item1)
-                        .ToDictionary(z => z.Key, z => z.Count()));
-
-            // create a dictionary of features count per category
-            // this is this part: Sum_ForEach_Feature( Count of number of Vouchers per feature)
-            _featuresCount = categToFeaturesCounts.ToDictionary(x => x.Key, x => x.Value.Sum(y => y.Value));
-
-            // p(Fx|Categ)
-            _featureLikellihood = categToFeaturesCounts
-                .ToDictionary(x => x.Key, x => x.Value
-                    .ToDictionary(y => y.Key, y => ((double)y.Value + 1) / (_featuresCount[x.Key] + _ftm.NumberOfValidFeatures)));
-
-
-            // Precompute posterior for each category:
-            // as described in definition, this is just a performance optimization:
-            // first we precalculate "aka" posteriors per category and during prediction
-            // alter posterior with test document features and add user category likellihood
-            _posterior = _featureLikellihood.ToDictionary(x => x.Key, x => 0.0);
-            foreach (var category in _featureLikellihood)
-            {
-                foreach (var featureId in _ftm.ReadFeatures())
-                {
-                    double likellihood;
-
-                    if (category.Value.ContainsKey(featureId))
-                    {
-                        // we know the feature
-                        likellihood = category.Value[featureId];
-                    }
-                    else
-                    {
-                        // feature is not used in category
-                        // therefore apply unknown feature likellihood
-                        likellihood = 1.0 / (_featuresCount[category.Key] + _ftm.NumberOfValidFeatures + 1);
-                    }
-                    _posterior[category.Key] += Math.Log(1.0 - likellihood);
-                }
-            }
+            TrainFeatures(vouchers);
+            TrainUserPreference(vouchers);
         }
 
         /// <summary>
@@ -269,6 +206,107 @@ namespace WindowsFormsApplication1
                 (values.Count() <= top) ? values.Select(x => new Prediction { Tag = x.Item1, ConfidenceLevel = PredictionConfidence.Medium, Score = x.Item2 }).Take(top).ToList() : new List<Prediction>();
         }
 
+        /// <summary>
+        /// Train posteriors: p(Categ), p(User,Categ)
+        /// </summary>
+        /// <param name="vouchers"></param>
+        void TrainUserPreference(IEnumerable<Voucher> vouchers)
+        {
+            // Compute conditional probabilities (likellihood) for Category given User:
+            // user per category likellihood: p(Categ, User) = p(Categ|User) * p(User)
+            // p(user) - can be ignored in prediction, since prediction is done per user
+
+            // category probabilities
+            _categPrior = vouchers.GroupBy(x => x.TagName).ToDictionary(x => x.Key, x => ((double)x.Count()) / vouchers.Count());
+
+            // number of vouchers per user ( aka count vouchers per category ) plus number of categories
+            _userCategCounts = vouchers
+                .GroupBy(g => g.OrganizationId)
+                .ToDictionary(x => x.Key, x => x.Count() + x.GroupBy(y => y.TagName).Count());
+
+            // userCategLikellihood = Count number of Category Voucher per User +1 / Sum_Foreach_Category(Count number of Category Voucher per User + 1)
+            _categUserLikellihood = vouchers.GroupBy(g => g.OrganizationId)
+                .ToDictionary(x => x.Key, x =>
+                    x.GroupBy(y => y.TagName)
+                    .ToDictionary(y => y.Key, y => ((double)y.Count() + 1) / _userCategCounts[x.Key]));
+        }
+
+        /// <summary>
+        /// Train model for selecting categories based on features
+        /// </summary>
+        /// <param name="ftm"></param>
+        void TrainFeatures(IEnumerable<Voucher> vouchers)
+        {
+            if (TrainingData != null)
+            {
+                var voucherDict = TrainingData.GroupBy(x=>x.Voucher.Id).ToDictionary(x => x.Key, x=>0);
+                
+                Parallel.ForEach<Voucher>(vouchers, // source collection
+                                        (voucher) => // method invoked by the loop on each iteration
+                                        {
+                                            if(!voucherDict.ContainsKey(voucher.Id))
+                                            {
+                                                var features = _ftm.ReadWeightedFeatures(voucher.OcrFeatures.ToList()).ToList();
+                                                var vFeatures = new VoucherFeatures { Features = features };
+                                                if (features.Count > 0)
+                                                {
+                                                     TrainingData.Add(new VoucherWeightedFeatures { Voucher = voucher, WeightedFeatures = features });
+                                                }
+                                            }
+                                        });
+
+            }
+            else
+            {
+                TrainingData = _ftm.ReadVouchersFeatures(vouchers);
+            }
+
+            //Compute conditional probabilities (likellihood) for Feature given Category:
+            //p(F1|Categ) = Count of number of Vouchers per feature F1 + 1 /  Sum_ForEach_Feature( Count of number of Vouchers per feature Fx + 1)
+            //  (.. + 1) - it is smoothing to account for missing features per category
+            var categToFeaturesCounts = TrainingData.GroupBy(g => g.Voucher.TagName)
+                .ToDictionary(x => x.Key, x =>
+                    x.SelectMany(y => y.WeightedFeatures)
+                        .GroupBy(y => y.Item1)
+                        .ToDictionary(z => z.Key, z => z.Count()));
+
+            // create a dictionary of features count per category
+            // this is this part: Sum_ForEach_Feature( Count of number of Vouchers per feature)
+            _featuresCount = categToFeaturesCounts.ToDictionary(x => x.Key, x => x.Value.Sum(y => y.Value));
+
+            // p(Fx|Categ)
+            _featureLikellihood = categToFeaturesCounts
+                .ToDictionary(x => x.Key, x => x.Value
+                    .ToDictionary(y => y.Key, y => ((double)y.Value + 1) / (_featuresCount[x.Key] + _ftm.NumberOfValidFeatures)));
+
+
+            // Precompute posterior for each category:
+            // as described in definition, this is just a performance optimization:
+            // first we precalculate "aka" posteriors per category and during prediction
+            // alter posterior with test document features and add user category likellihood
+            _posterior = _featureLikellihood.ToDictionary(x => x.Key, x => 0.0);
+            foreach (var category in _featureLikellihood)
+            {
+                foreach (var featureId in _ftm.ReadFeatures())
+                {
+                    double likellihood;
+
+                    if (category.Value.ContainsKey(featureId))
+                    {
+                        // we know the feature
+                        likellihood = category.Value[featureId];
+                    }
+                    else
+                    {
+                        // feature is not used in category
+                        // therefore apply unknown feature likellihood
+                        likellihood = 1.0 / (_featuresCount[category.Key] + _ftm.NumberOfValidFeatures + 1);
+                    }
+                    _posterior[category.Key] += Math.Log(1.0 - likellihood);
+                }
+            }
+        }
+
         #region serialize
 
         public void Read(BinaryReader binaryReader)
@@ -307,6 +345,44 @@ namespace WindowsFormsApplication1
                 return Guid.Parse(reader.ReadString());
             };
 
+            Func<BinaryReader, List<VoucherWeightedFeatures>> deserialize_list_VoucherWeightedFeatures = (reader) =>
+            {
+                List<VoucherWeightedFeatures> ret = new List<VoucherWeightedFeatures>();
+
+                int cnt = reader.ReadInt32();
+
+                for (int i = 0; i < cnt; i++)
+                {
+                    var voucher = new Voucher
+                    {
+                        TagName = reader.ReadString(),
+                        Id = reader.ReadInt32(),
+                        OrganizationId = reader.ReadInt32(),
+                        Company = reader.ReadString(),
+                        OcrPath = reader.ReadString()
+                    };
+
+                    // read OCR features
+                    int nOcr = reader.ReadInt32();
+                    voucher.OcrFeatures = new List<string>();
+                    for (int y = 0; y < nOcr; y++)
+                    {
+                        voucher.OcrFeatures.Add(reader.ReadString());
+                    }
+
+                    var features = new List<Tuple<int, double>>();
+                    int fcnt = reader.ReadInt32();
+                    for (int y = 0; y < fcnt; y++)
+                    {
+                        features.Add(new Tuple<int, double>(reader.ReadInt32(), reader.ReadDouble()));
+                    }
+
+                    ret.Add(new VoucherWeightedFeatures { Voucher = voucher, WeightedFeatures = features });
+                }
+
+                return ret;
+            };
+
             int version = deserialize_int(binaryReader);
             if (Version != version)
             {
@@ -318,6 +394,8 @@ namespace WindowsFormsApplication1
             {
                 throw new InvalidOperationException("Version of Feature Manager file is not compatible with Model file.");
             }
+
+            TrainingData = deserialize_list_VoucherWeightedFeatures(binaryReader);
 
             _userCategCounts = new Dictionary<int, int>();
             ReadFile<int, int>(binaryReader, _userCategCounts, deserialize_int, deserialize_int);
@@ -382,8 +460,41 @@ namespace WindowsFormsApplication1
                 writer.Write(guid.ToString());
             };
 
+            Action<List<VoucherWeightedFeatures>, BinaryWriter> serialize_list_VoucherWeightedFeatures = (voucherFeatures, writer) =>
+            {
+                writer.Write(voucherFeatures.Count);
+
+                foreach (var voucherFeature in voucherFeatures)
+                {
+                    var voucher = voucherFeature.Voucher;
+
+                    // write attributes
+                    writer.Write(voucher.TagName);
+                    writer.Write(voucher.Id);
+                    writer.Write(voucher.OrganizationId);
+                    writer.Write(voucher.Company);
+                    writer.Write(voucher.OcrPath);
+
+                    // write OCR features
+                    writer.Write(voucher.OcrFeatures.Count);
+                    foreach (var f in voucher.OcrFeatures)
+                    {
+                        writer.Write(f);
+                    }
+
+                    var features = voucherFeature.WeightedFeatures;
+                    writer.Write(features.Count);
+                    foreach (var feature in features)
+                    {
+                        writer.Write(feature.Item1);
+                        writer.Write(feature.Item2);
+                    }
+                }
+            };
+
             serialize_int(Version, binaryWriter);
             serialize_guid(FeatureSerializationId, binaryWriter);
+            serialize_list_VoucherWeightedFeatures(TrainingData, binaryWriter);
             WriteFile<int, int>(binaryWriter, _userCategCounts, serialize_int, serialize_int);
             WriteFile<string, Dictionary<int, double>>(binaryWriter, _featureLikellihood, serialize_string, serialize_dictionary_int_double);
             WriteFile<int, Dictionary<string, double>>(binaryWriter, _categUserLikellihood, serialize_int, serialize_dictionary_string_double);
