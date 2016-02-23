@@ -81,22 +81,22 @@ namespace WindowsFormsApplication1
         /// when features are filtered by weights, we need to make sure those features is sequentually ordered (0,1,2,3,4,5,6,7,8,...)
         /// This is needed to train model like SVM were sparse feature vector is used
         /// </summary>
-        Dictionary<int, int> _filteredFeatures = new Dictionary<int, int>();
+        Dictionary<int, int> _filteredFeatures;
 
         /// <summary>
         /// Importance of the feature ]0,1]
         /// </summary>
-        Dictionary<int, double> _featureWeight = new Dictionary<int, double>();
+        Dictionary<int, double> _featureWeight;
 
         /// <summary>
         /// Map feature Id to feature value
         /// </summary>
-        Dictionary<int, string> _featureById = new Dictionary<int, string>();
+        Dictionary<int, string> _featureById;
 
         /// <summary>
         /// Inverted n-gramms index. Each n-gramm point to list of features 
         /// </summary>
-        Dictionary<string, Dictionary<int, int>> _bgrams = new Dictionary<string, Dictionary<int, int>>();
+        Dictionary<string, Dictionary<int, int>> _bgrams;
 
         /// <summary>
         /// For each feature compute the number of categories it is used
@@ -172,6 +172,8 @@ namespace WindowsFormsApplication1
 
         public void Read(BinaryReader binaryReader)
         {
+            InitializeMembers();
+
             Func<BinaryReader, int> deserialize_int = (reader) =>
             {
                 return reader.ReadInt32();
@@ -345,6 +347,8 @@ namespace WindowsFormsApplication1
 
         public void Initialize(IEnumerable<Voucher> vouchers)
         {
+            InitializeMembers();
+
             #region Split Words in Tri-Grams
 
             Dictionary<int, string> invWords = new Dictionary<int, string>();
@@ -408,53 +412,6 @@ namespace WindowsFormsApplication1
             #endregion
 
             #region Compute similiarity matrix
-
-            ////////////
-            /*List<Tuple<int, int, double>> similiaritiesMerged = new List<Tuple<int, int, double>>();
-           
-            Dictionary<Tuple<int, int>, double> matchD = new Dictionary<Tuple<int,int>,double>();
-
-            for (int skip = 1; skip < 10; skip++)
-            {
-                Dictionary<Tuple<int, int>, double> similiarityD = new Dictionary<Tuple<int, int>, double>();
-
-                foreach (var x in bgrams)
-                {
-                    var first = x.Value.First();
-                    foreach (var word in x.Value.Skip(skip))
-                    {
-                        var key = new Tuple<int, int>(first.Key, word.Key);
-
-                        if (!matchD.ContainsKey(key))
-                        {
-                            if (similiarityD.ContainsKey(key))
-                            {
-                                similiarityD[key] += Math.Min(first.Value, word.Value);
-                            }
-                            else
-                            {
-                                similiarityD[key] = Math.Min(first.Value, word.Value);
-                            }
-                        }
-                        first = word;
-                    }
-                }
-
-                similiarityD
-                    .Where(x => x.Value / (invWords[x.Key.Item1].Length + invWords[x.Key.Item2].Length - x.Value) >= _similiarityThreshold)
-                    .ToList()
-                    .ForEach(x => matchD.Add(x.Key, x.Value / (invWords[x.Key.Item1].Length + invWords[x.Key.Item2].Length - x.Value)));
-
-                similiarityD.Clear();
-            }*/
-
-            /*List<Tuple<int, int, double>> similiaritiesMerged = similiarityD
-                .Select(x => new Tuple<int, int, double>(x.Key.Item1, x.Key.Item2, x.Value / (invWords[x.Key.Item1].Length + invWords[x.Key.Item2].Length - x.Value)))
-                .Where(x => x.Item3 >= _similiarityThreshold)
-                .ToList();*/
-
-
-            ////////////
 
             var sync = new Object();
             List<Tuple<int, int, double>> similiaritiesMerged = new List<Tuple<int, int, double>>();
@@ -536,6 +493,7 @@ namespace WindowsFormsApplication1
             #endregion
 
             #region Create Final Features Tri-Grams
+
             int ifeature = 0;
             Dictionary<string, int> existsFeature = new Dictionary<string, int>();
 
@@ -593,6 +551,9 @@ namespace WindowsFormsApplication1
 
         public void CalculateFeaturesWeights(IEnumerable<Voucher> vouchers)
         {
+            Dictionary<string, List<Tuple<int, double>>> featuresCache = new Dictionary<string, List<Tuple<int, double>>>();
+            object syncFeatureCache = new object();
+
             _featureWeight = _featureById.ToDictionary(x => x.Key, x => 1.0);
 
             //Create Features to Vouchers Mappings
@@ -622,7 +583,7 @@ namespace WindowsFormsApplication1
                                     () => new Dictionary<int, List<Voucher>>(), // method to initialize the local variable
                                     (voucher, loop, partfeature2Vouchers) => // method invoked by the loop on each iteration
                                     {
-                                        foreach (var x in ExpandFeatures(voucher.OcrFeatures.ToList()))
+                                        foreach (var x in ExpandFeatures(voucher.OcrFeatures.ToList(), featuresCache, syncFeatureCache))
                                         {
                                             if (partfeature2Vouchers.ContainsKey(x.Item1))
                                             {
@@ -686,29 +647,103 @@ namespace WindowsFormsApplication1
 
         public List<VoucherWeightedFeatures> ReadVouchersFeatures(IEnumerable<Voucher> vouchers)
         {
-            object sync = new object();
+            Dictionary<string, List<Tuple<int, double>>> featuresCache = new Dictionary<string, List<Tuple<int, double>>>();
+            object syncFeatureCache = new object();
             List<VoucherWeightedFeatures> ret = new List<VoucherWeightedFeatures>();
-
+            object sync = new object();
+            
             Parallel.ForEach<Voucher>(vouchers, // source collection
                                    (voucher) => // method invoked by the loop on each iteration
                                    {
-                                       var features = ReadWeightedFeatures(voucher.OcrFeatures.ToList()).ToList();
-                                       var vFeatures = new VoucherFeatures { Features = features };
+                                       var features = ExpandFeatures(voucher.OcrFeatures.ToList(), featuresCache, syncFeatureCache).Select(x => new Tuple<int, double>(_filteredFeatures[x.Item1], x.Item2)).ToList();
                                        if (features.Count > 0)
                                        {
                                            lock (sync)
                                            {
-
                                                ret.Add(new VoucherWeightedFeatures { Voucher = voucher, WeightedFeatures = features });
-
                                            }
                                        }
                                    });
-
             return ret;
         }
 
-        List<VoucherWeightedFeatures> ReadUniqueVouchers(IEnumerable<Voucher> vouchers)
+        IEnumerable<Tuple<int, double>> ExpandFeatures(List<string> ocrFeatures, Dictionary<string, List<Tuple<int, double>>> featuresCache = null, object sync = null)
+        {
+            IEnumerable<Tuple<int, double>> features = ocrFeatures.Distinct().SelectMany(f =>
+            {
+                List<Tuple<int, double>> matchFeatures = new List<Tuple<int, double>>();
+
+                if (featuresCache != null)
+                {
+                    lock (sync)
+                    {
+                        if (featuresCache.ContainsKey(f))
+                        {
+                            return featuresCache[f];
+                        }
+                    }
+                }
+
+                double checkingThreshold = Math.Floor(_similiarityThreshold * f.Length);
+                Dictionary<int, double> matches = new Dictionary<int, double>();
+                List<string> ngrams = MakeNGram(f);
+                foreach (var bg in ngrams.GroupBy(x => x))
+                {
+                    if (_bgrams.ContainsKey(bg.Key))
+                    {
+                        foreach (var x in _bgrams[bg.Key])
+                        {
+                            double m = Math.Min(x.Value, bg.Count());
+                            if (matches.ContainsKey(x.Key))
+                            {
+                                m += matches[x.Key];
+                            }
+
+                            if (m >= checkingThreshold)
+                            {
+                                double sim = m / (_featureById[x.Key].Length + ngrams.Count - m);
+                                if (sim >= _similiarityThreshold)
+                                {
+                                    if (_featureWeight[x.Key] >= _exponentialConstant)
+                                    {
+                                        matchFeatures.Add(new Tuple<int, double>(x.Key, _featureWeight[x.Key]));
+                                    }
+                                    matches.Remove(x.Key);
+                                    continue;
+                                }
+                            }
+                            matches[x.Key] = m;
+                        }
+                    }
+                }
+
+                if (featuresCache != null)
+                {
+                    lock (sync)
+                    {
+                        if (!featuresCache.ContainsKey(f))
+                        {
+                            featuresCache[f] = matchFeatures;
+                        }
+                    }
+                }
+
+                return matchFeatures;
+
+            }).Distinct();
+
+            return features;
+        }
+
+        void InitializeMembers()
+        {
+            _filteredFeatures = new Dictionary<int, int>();
+            _featureWeight = new Dictionary<int, double>();
+            _featureById = new Dictionary<int, string>();
+            _bgrams = new Dictionary<string, Dictionary<int, int>>();
+        }
+
+        /*List<VoucherWeightedFeatures> ReadUniqueVouchers(IEnumerable<Voucher> vouchers)
         {
             object sync = new object();
             List<VoucherWeightedFeatures> ret = new List<VoucherWeightedFeatures>();
@@ -747,59 +782,7 @@ namespace WindowsFormsApplication1
 
 
             return ret;
-        }
+        }*/
 
-        IEnumerable<Tuple<int, double>> ExpandFeatures(List<string> ocrFeatures)
-        {
-            IEnumerable<Tuple<int, double>> features = ocrFeatures.Distinct().SelectMany(f =>
-            {
-                double checkingThreshold = Math.Floor(_similiarityThreshold * f.Length);
-                List<Tuple<int, double>> matchFeatures = new List<Tuple<int, double>>();
-                Dictionary<int, double> matches = new Dictionary<int, double>();
-                List<string> ngrams = MakeNGram(f);
-                foreach (var bg in ngrams.GroupBy(x => x))
-                {
-                    if (_bgrams.ContainsKey(bg.Key))
-                    {
-                        foreach (var x in _bgrams[bg.Key])
-                        {
-                            double m = Math.Min(x.Value, bg.Count());
-                            if (matches.ContainsKey(x.Key))
-                            {
-                                m += matches[x.Key];
-                            }
-
-                            if (m >= checkingThreshold)
-                            {
-                                double sim = m / (_featureById[x.Key].Length + ngrams.Count - m);
-                                if (sim >= _similiarityThreshold)
-                                {
-                                    if (_featureWeight[x.Key] >= _exponentialConstant)
-                                    {
-                                        matchFeatures.Add(new Tuple<int, double>(x.Key, _featureWeight[x.Key]));
-                                    }
-                                    matches.Remove(x.Key);
-                                    continue;
-                                }
-                            }
-                            matches[x.Key] = m;
-                        }
-                    }
-                }
-                /*var ret = matches
-                    .Select(x => new Tuple<int, double>(x.Key, x.Value / ((_featureById[x.Key].Length - _ngram + 3) + ngrams.Count - x.Value)))
-                    .Where(x => x.Item2 >= _similiarityThreshold && _featureWeight[x.Item1] >= _exponentialConstant)
-                    .GroupBy(x => x.Item1)
-                    .Select(x => new Tuple<int, double>(x.Key, _featureWeight[x.Key]))
-                    .ToList();
-
-                return ret;*/
-
-                return matchFeatures;
-
-            }).Distinct();
-
-            return features;
-        }
     }
 }
