@@ -62,7 +62,7 @@ namespace WindowsFormsApplication1
         /// Then when we predict, for each existing feature in the test voucher simply do:
         /// posterior(c) = posterior(c) - log(1-p(ccategX | featureY)) + log(p(ccategX | featureY))
         /// </summary>
-        Dictionary<string, double> _posterior = new Dictionary<string, double>();
+        Dictionary<string, double> _posterior;
 
         /// <summary>
         /// Stores vouchers for training. We add new vouchers to existing collection when doing
@@ -240,21 +240,7 @@ namespace WindowsFormsApplication1
             if (TrainingData != null)
             {
                 var voucherDict = TrainingData.GroupBy(x=>x.Voucher.Id).ToDictionary(x => x.Key, x=>0);
-                
-                Parallel.ForEach<Voucher>(vouchers, // source collection
-                                        (voucher) => // method invoked by the loop on each iteration
-                                        {
-                                            if(!voucherDict.ContainsKey(voucher.Id))
-                                            {
-                                                var features = _ftm.ReadWeightedFeatures(voucher.OcrFeatures.ToList()).ToList();
-                                                var vFeatures = new VoucherFeatures { Features = features };
-                                                if (features.Count > 0)
-                                                {
-                                                     TrainingData.Add(new VoucherWeightedFeatures { Voucher = voucher, WeightedFeatures = features });
-                                                }
-                                            }
-                                        });
-
+                TrainingData.AddRange(_ftm.ReadVouchersFeatures(vouchers.Where(x => !voucherDict.ContainsKey(x.Id))));
             }
             else
             {
