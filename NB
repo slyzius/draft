@@ -16,12 +16,12 @@ namespace WindowsFormsApplication1
         /// <summary>
         /// Current version
         /// </summary>
-        int Version = 103;
+        int Version = 104;
 
         /// <summary>
         /// Feature managers' unique id.
         /// </summary>
-        Guid FeatureSerializationId { get; set; }
+        Guid _featureSerializationId;
 
         /// <summary>
         /// Training features
@@ -78,10 +78,21 @@ namespace WindowsFormsApplication1
         public void Load(string file, FeatureManager ftm)
         {
             _ftm = ftm;
-            FeatureSerializationId = _ftm.SerializationId;
+            _featureSerializationId = _ftm.SerializationId;
 
             using (FileStream fs = File.OpenRead(file))
             using (BinaryReader reader = new BinaryReader(fs))
+            {
+                Read(reader);
+            }
+        }
+
+        public void Load(Stream data, FeatureManager ftm)
+        {
+            _ftm = ftm;
+            _featureSerializationId = _ftm.SerializationId;
+
+            using (var reader = new BinaryReader(data))
             {
                 Read(reader);
             }
@@ -103,7 +114,7 @@ namespace WindowsFormsApplication1
         public void Train(FeatureManager ftm, IEnumerable<Voucher> vouchers)
         {
             _ftm = ftm;
-            FeatureSerializationId = _ftm.SerializationId;
+            _featureSerializationId = _ftm.SerializationId;
 
             TrainFeatures(vouchers);
             TrainUserPreference(vouchers);
@@ -163,7 +174,7 @@ namespace WindowsFormsApplication1
                 }
             }
 
-            var tmp = posterior.Where(x => selectedFeatures[x.Key] > 0).Select(x => new Tuple<string, double>(x.Key, x.Value)).OrderByDescending(x => x.Item2).Take(top * 2).ToList();
+            var tmp = posterior.Where(x => selectedFeatures[x.Key] > 0 /* / ocrFeatures.Count > 0.05*/).Select(x => new Tuple<string, double>(x.Key, x.Value)).OrderByDescending(x => x.Item2).Take(top * 2).ToList();
             return SelectPreferred(tmp, top);
         }
 
@@ -375,8 +386,8 @@ namespace WindowsFormsApplication1
                 throw new InvalidOperationException("Version of Model file is not compatible");
             }
 
-            FeatureSerializationId = deserialize_guid(binaryReader);
-            if (FeatureSerializationId != _ftm.SerializationId)
+            _featureSerializationId = deserialize_guid(binaryReader);
+            if (_featureSerializationId != _ftm.SerializationId)
             {
                 throw new InvalidOperationException("Version of Feature Manager file is not compatible with Model file.");
             }
@@ -479,7 +490,7 @@ namespace WindowsFormsApplication1
             };
 
             serialize_int(Version, binaryWriter);
-            serialize_guid(FeatureSerializationId, binaryWriter);
+            serialize_guid(_featureSerializationId, binaryWriter);
             serialize_list_VoucherWeightedFeatures(TrainingData, binaryWriter);
             WriteFile<int, int>(binaryWriter, _userCategCounts, serialize_int, serialize_int);
             WriteFile<string, Dictionary<int, double>>(binaryWriter, _featureLikellihood, serialize_string, serialize_dictionary_int_double);
