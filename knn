@@ -1,0 +1,482 @@
+﻿using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace WindowsFormsApplication1
+{
+    class KNNClassifier
+    {
+        private FeatureManager _ftm;
+        private Dictionary<int, List<Voucher>> _features2Vouchers = new Dictionary<int, List<Voucher>>();
+        private Dictionary<Voucher, List<int>> _vouchersFeatures = new Dictionary<Voucher, List<int>>();
+
+        public KNNClassifier(FeatureManager ftm)
+        {
+            _ftm = ftm;
+        }
+
+        #region serialization
+
+        public void Load(string file)
+        {
+            using (FileStream fs = File.OpenRead(file))
+            using (BinaryReader reader = new BinaryReader(fs))
+            {
+                Read(reader);
+            }
+
+            foreach (var feature in _features2Vouchers)
+            {
+                feature.Value.ForEach(x =>
+                {
+                    if (_vouchersFeatures.ContainsKey(x))
+                    {
+                        _vouchersFeatures[x].Add(feature.Key);
+                    }
+                    else
+                    {
+                        _vouchersFeatures.Add(x, new List<int> { feature.Key });
+                    }
+                });
+            }
+
+        }
+
+        public void Save(string file)
+        {
+            using (FileStream fs = File.OpenWrite(file))
+            using (BinaryWriter writer = new BinaryWriter(fs))
+            {
+                Write(writer);
+            }
+        }
+
+        public void Read(BinaryReader binaryReader)
+        {
+            Func<BinaryReader, int> deserialize_int = (reader) =>
+            {
+                return reader.ReadInt32();
+            };
+
+            Func<BinaryReader, List<Voucher>> deserialize_list_voucher = (reader) =>
+            {
+                List<Voucher> ret = new List<Voucher>();
+                int count = reader.ReadInt32();
+
+                for (int i = 0; i < count; i++)
+                {
+                    var voucher = new Voucher
+                    {
+                        TagName = reader.ReadString(),
+                        Id = reader.ReadInt32(),
+                        OrganizationId = reader.ReadInt32(),
+                        Company = reader.ReadString(),
+                        OcrPath = reader.ReadString()
+                    };
+
+                    // read OCR features
+                    int nOcr = reader.ReadInt32();
+                    voucher.OcrFeatures = new List<string>();
+                    for (int y = 0; y < nOcr; y++)
+                    {
+                        voucher.OcrFeatures.Add(reader.ReadString());
+                    }
+                    ret.Add(voucher);
+                }
+                return ret;
+            };
+
+            ReadFile<int, List<Voucher>>(binaryReader, _features2Vouchers, deserialize_int, deserialize_list_voucher);
+        }
+
+        static void ReadFile<TKey, TValue>(BinaryReader reader, Dictionary<TKey, TValue> dict, Func<BinaryReader, TKey> deserializeKey, Func<BinaryReader, TValue> deserializeValue)
+        {
+            int count = reader.ReadInt32();
+            for (int i = 0; i < count; i++)
+            {
+                TKey key = deserializeKey(reader);
+                TValue val = deserializeValue(reader);
+                dict.Add(key, val);
+            }
+        }
+
+        public void Write(BinaryWriter binaryWriter)
+        {
+            Action<int, BinaryWriter> serialize_int = (Int, writer) =>
+            {
+                writer.Write(Int);
+            };
+
+            Action<List<Voucher>, BinaryWriter> serialize_list_voucher = (vouchers, writer) =>
+            {
+                writer.Write(vouchers.Count);
+                foreach (var voucher in vouchers)
+                {
+                    // write attributes
+                    writer.Write(voucher.TagName);
+                    writer.Write(voucher.Id);
+                    writer.Write(voucher.OrganizationId);
+                    writer.Write(voucher.Company);
+                    writer.Write(voucher.OcrPath);
+
+                    // write OCR features
+                    writer.Write(voucher.OcrFeatures.Count);
+                    foreach (var f in voucher.OcrFeatures)
+                    {
+                        writer.Write(f);
+                    }
+                }
+            };
+            WriteFile<int, List<Voucher>>(binaryWriter, _features2Vouchers, serialize_int, serialize_list_voucher);
+        }
+
+        static void WriteFile<TKey, TValue>(BinaryWriter writer, Dictionary<TKey, TValue> dict, Action<TKey, BinaryWriter> serializeKey, Action<TValue, BinaryWriter> serializeValue)
+        {
+            // Put count.
+            writer.Write(dict.Count);
+            // Write pairs.
+            foreach (var pair in dict)
+            {
+                serializeKey(pair.Key, writer);
+                serializeValue(pair.Value, writer);
+            }
+        }
+
+        #endregion
+
+
+        public void Initialize(Voucher[] vouchers)
+        {
+            Action<List<Tuple<int, double>>, Voucher> indexVoucher = (f, v) =>
+            {
+                f.ForEach(x =>
+                {
+                    if (_features2Vouchers.ContainsKey(x.Item1))
+                    {
+                        _features2Vouchers[x.Item1].Add(v);
+                    }
+                    else
+                    {
+                        _features2Vouchers.Add(x.Item1, new List<Voucher> { v });
+                    }
+                });
+            };
+
+            foreach (var voucherFeatures in _ftm.ReadVouchersFeatures(vouchers))
+            {
+                var features = voucherFeatures.WeightedFeatures;
+                if (features.Count > 0)
+                {
+                    indexVoucher(features, voucherFeatures.Voucher);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Predict using weighted Jaccard similiarity measure
+        /// sim(x,d) = sum(min(x[],d[])) / sum(max(x[],d[]))
+        /// </summary>
+        /// <param name="ocrFeatures"></param>
+        /// <returns></returns>
+        public List<Prediction> Predict(List<string> ocrFeatures, int oid, OrganizationPreferrences organizationPreferrences)
+        {
+            bool l = false;
+            if (l)
+            {
+                var pp = organizationPreferrences.GetOrganizationPreferences(oid);
+            }
+
+            Dictionary<Voucher, double> product = new Dictionary<Voucher, double>();
+
+            var features = _ftm.ReadWeightedFeatures(ocrFeatures).ToList();
+
+            /*if(features.Count == 0 || features.Average(x => x.Item2) < 0.1)
+            {
+                return new List<Prediction>();
+            }*/
+
+            foreach (var feature in features)
+            {
+                if (_features2Vouchers.ContainsKey(feature.Item1))
+                {
+                    foreach (var voucher in _features2Vouchers[feature.Item1])
+                    {
+                        if (product.ContainsKey(voucher))
+                        {
+                            product[voucher] += feature.Item2;
+                        }
+                        else
+                        {
+                            product.Add(voucher, feature.Item2);
+                        }
+                    }
+                }
+            }
+
+            Func<double, PredictionConfidence> getConfidence = (tagsCount) =>
+            {
+                if (tagsCount >= 4.0 / 7)
+                {
+                    return PredictionConfidence.High;
+                }
+                else if (tagsCount >= 3.0 / 7)
+                {
+                    return PredictionConfidence.Medium;
+                }
+                else
+                {
+                    return PredictionConfidence.Low;
+                }
+            };
+
+            /*var tmp2 = product.Select(x => new Tuple<string, double>(x.Key.TagName, x.Value / features.Count))
+                .OrderByDescending(x => x.Item2)
+                .ToArray();*/
+
+            if (l)
+            {
+                var tmp1 = product.Select(x => new Tuple<string, double>(x.Key.TagName, organizationPreferrences.GetTagLikelihood(oid, x.Key.TagName)))
+                    .OrderByDescending(x => x.Item2)
+                    //.Take(7)
+                    .ToList();
+            }
+
+
+
+            var scale = product.Select(x => x.Value / features.Count());
+            double min = 0.0, max = 1.0;
+
+            if (scale.Count() > 1)
+            {
+                max = scale.Max();
+                min = scale.Min();
+
+                if (min == max)
+                {
+                    min = 0.0;
+                    max = 1.0;
+                }
+            }
+
+            if (l)
+            {
+                var tmp2 = product.Select(x => new Tuple<string, double>(x.Key.TagName, (x.Value / (features.Count) /*- min*/) / (max /*- min*/)))
+                    .OrderByDescending(x => x.Item2)
+                    //.Take(7)
+                    .ToList();
+            }
+
+            var tmp = product.Select(x => new Tuple<string, double>(x.Key.TagName, 0.7 * (x.Value / (features.Count) /*- min*/) / (max/*-min*/) + 0.3 * organizationPreferrences.GetTagLikelihood(oid, x.Key.TagName)))
+                .OrderByDescending(x => x.Item2)
+                .Take(7)
+                .GroupBy(x => x.Item1)
+                .Select(g => new Tuple<string, double, double>(g.Key, ((double)g.Count()) / 7, g.Sum(x => x.Item2)));
+
+            return tmp.Select(x => new Prediction { Tag = x.Item1, ConfidenceLevel = getConfidence(x.Item2), Score = x.Item3 }).ToList();
+
+            /*var tmp = product.Select(x => new Tuple<string, double>(x.Key.TagName, x.Value / (features.Count)))
+                .GroupBy(x => x.Item1)
+                .Select(g => new Tuple<string, double>(g.Key, g.Sum(x => x.Item2)))
+                .OrderByDescending(x => x.Item2)
+                .Take(10);
+
+            return tmp.Select(x => new Prediction { Tag = x.Item1, ConfidenceLevel = getConfidence(x.Item2), Score = x.Item2 }).ToList();*/
+
+
+            /*var tmp = product.Select(x => new Tuple<string, double>(x.Key.TagName, x.Value / (Math.Sqrt(features.Count) * Math.Sqrt(_vouchersFeatures[x.Key]))))
+                .OrderByDescending(x => x.Item2)
+                .Take(7)
+                .GroupBy(x=>x.Item1)
+                .Select(g => new Tuple<string, double, double>(g.Key, ((double)g.Count())/7, g.Sum(x => x.Item2)));
+
+            return tmp.Select(x => new Prediction { Tag = x.Item1, ConfidenceLevel = getConfidence(x.Item2), Score = x.Item3 }).ToList();*/
+        }
+
+        public List<Prediction> Predict3(List<string> ocrFeatures, int oid, OrganizationPreferrences organizationPreferrences)
+        {
+            bool l = false;
+            Dictionary<Voucher, double> product = new Dictionary<Voucher, double>();
+
+            var features = _ftm.ReadWeightedFeatures(ocrFeatures).ToList();
+            foreach (var feature in features)
+            {
+                if (_features2Vouchers.ContainsKey(feature.Item1))
+                {
+                    foreach (var voucher in _features2Vouchers[feature.Item1])
+                    {
+                        if (product.ContainsKey(voucher))
+                        {
+                            product[voucher] += feature.Item2;
+                        }
+                        else
+                        {
+                            product.Add(voucher, feature.Item2);
+                        }
+                    }
+                }
+            }
+
+            Func<double, PredictionConfidence> getConfidence = (tagsCount) =>
+            {
+                if (tagsCount >= 4.0 / 7)
+                {
+                    return PredictionConfidence.High;
+                }
+                else if (tagsCount >= 3.0 / 7)
+                {
+                    return PredictionConfidence.Medium;
+                }
+                else
+                {
+                    return PredictionConfidence.Low;
+                }
+            };
+
+
+            if (l)
+            {
+                var tmp1 = product.Select(x => new Tuple<string, double>(x.Key.TagName, organizationPreferrences.GetTagLikelihood(oid, x.Key.TagName)))
+                    .OrderByDescending(x => x.Item2)
+                    //.Take(7)
+                    .ToList();
+            }
+
+
+
+            var scale = product.Select(x => x.Value / features.Count);
+            double min = 0.0, max = 1.0;
+
+            if (scale.Count() > 1)
+            {
+                max = scale.Max();
+                min = scale.Min();
+
+                if (min == max)
+                {
+                    min = 0.0;
+                    max = 1.0;
+                }
+            }
+
+            if (l)
+            {
+                var tmp2 = product.Select(x => new Tuple<string, double>(x.Key.TagName, (x.Value / (features.Count) /*- min*/) / (max /*- min*/)))
+                    .OrderByDescending(x => x.Item2)
+                    //.Take(7)
+                    .ToList();
+            }
+
+            var tmp = product.Select(x => new Tuple<string, double>(x.Key.TagName, 0.7 * (x.Value / (features.Count) /*- min*/) / (max/*-min*/) + 0.3 * organizationPreferrences.GetTagLikelihood(oid, x.Key.TagName)))
+                .OrderByDescending(x => x.Item2)
+                .Take(7)
+                .GroupBy(x => x.Item1)
+                .Where(x => x.Count() > 1)
+                .Select(g => new Tuple<string, double>(g.Key, g.Sum(x => x.Item2) / g.Count()));
+
+            return tmp.Select(x => new Prediction { Tag = x.Item1, ConfidenceLevel = getConfidence(x.Item2), Score = x.Item2 }).ToList();
+
+        }
+
+        private IEnumerable<Tuple<Voucher, double>> GetNeighbours(List<string> ocrFeatures)
+        {
+            Dictionary<Voucher, double> product = new Dictionary<Voucher, double>();
+
+            var features = _ftm.ReadWeightedFeatures(ocrFeatures).ToList();
+            foreach (var feature in features)
+            {
+                if (_features2Vouchers.ContainsKey(feature.Item1))
+                {
+                    foreach (var voucher in _features2Vouchers[feature.Item1])
+                    {
+                        if (product.ContainsKey(voucher))
+                        {
+                            product[voucher] += feature.Item2;
+                        }
+                        else
+                        {
+                            product.Add(voucher, feature.Item2);
+                        }
+                    }
+                }
+            }
+
+            return product
+                .Select(x => new Tuple<Voucher, double>(x.Key, x.Value / (features.Count)))
+                .OrderByDescending(x => x.Item2);
+        }
+
+        public List<Prediction> Predict2(List<string> ocrFeatures)
+        {
+            Func<double, PredictionConfidence> getConfidence = (tagsCount) =>
+            {
+                if (tagsCount >= 4.0 / 7)
+                {
+                    return PredictionConfidence.High;
+                }
+                else if (tagsCount >= 3.0 / 7)
+                {
+                    return PredictionConfidence.Medium;
+                }
+                else
+                {
+                    return PredictionConfidence.Low;
+                }
+            };
+
+            Dictionary<Voucher, double> product = new Dictionary<Voucher, double>();
+
+            var features = _ftm.ReadWeightedFeatures(ocrFeatures).ToList();
+            foreach (var feature in features)
+            {
+                if (_features2Vouchers.ContainsKey(feature.Item1))
+                {
+                    foreach (var voucher in _features2Vouchers[feature.Item1])
+                    {
+                        if (product.ContainsKey(voucher))
+                        {
+                            product[voucher] += feature.Item2;
+                        }
+                        else
+                        {
+                            product.Add(voucher, feature.Item2);
+                        }
+                    }
+                }
+            }
+
+            var candidates = product
+                .Select(x => new Tuple<Voucher, double>(x.Key, x.Value / (features.Count)))
+                .OrderByDescending(x => x.Item2);
+
+            var ret = new List<Tuple<string, double>>();
+            foreach (var candidate in candidates)
+            {
+                IEnumerable<Tuple<Voucher, double>> neighbourPredict = GetNeighbours(candidate.Item1.OcrFeatures).Take(7);
+
+                if (neighbourPredict.Any(x => x.Item1 == candidate.Item1))
+                {
+                    ret.Add(new Tuple<string, double>(candidate.Item1.TagName, candidate.Item2));
+                }
+                else
+                {
+                    continue;
+                }
+
+                if (ret.Count == 7)
+                {
+                    break;
+                }
+            }
+
+            var tmp = ret
+                .OrderByDescending(x => x.Item2)
+                .GroupBy(x => x.Item1)
+                .Select(g => new Tuple<string, double, double>(g.Key, ((double)g.Count()) / 7, g.Sum(x => x.Item2)));
+
+            return tmp.Select(x => new Prediction { Tag = x.Item1, ConfidenceLevel = getConfidence(x.Item2), Score = x.Item3 }).ToList();
+        }
+    }
+}
