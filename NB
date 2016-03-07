@@ -1,4 +1,4 @@
-﻿using System;
+﻿﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -174,8 +174,11 @@ namespace WindowsFormsApplication1
                 }
             }
 
-            var tmp = posterior.Where(x => selectedFeatures[x.Key] > 0 /* / ocrFeatures.Count > 0.05*/).Select(x => new Tuple<string, double>(x.Key, x.Value)).OrderByDescending(x => x.Item2).Take(top * 2).ToList();
-            return SelectPreferred(tmp, top);
+            var sumProbs = posterior.Where(x => selectedFeatures[x.Key] > 0).Sum(x => Math.Sqrt(Math.Exp(x.Value)));
+            var tmp = posterior.Where(x => selectedFeatures[x.Key] > 0 )
+                .Select(x => new Tuple<string, double>(x.Key, x.Value))
+                .OrderByDescending(x => x.Item2).Take(top*2);
+            return SelectPreferred(tmp, sumProbs, top, features.Count);
         }
 
         /// <summary>
@@ -186,7 +189,7 @@ namespace WindowsFormsApplication1
         /// <param name="values"></param>
         /// <param name="top"></param>
         /// <returns></returns>
-        private List<Prediction> SelectPreferred(IEnumerable<Tuple<string, double>> values, int top)
+        private List<Prediction> SelectPreferred(IEnumerable<Tuple<string, double>> values, double sumProbs, int top, int featuresCount)
         {
             Func<double, PredictionConfidence> getConfidence = (zscore) =>
             {
@@ -208,13 +211,23 @@ namespace WindowsFormsApplication1
             double sd = Math.Sqrt(values.Sum(x => Math.Pow(x.Item2 - avg, 2)) / values.Count());
 
             return sd > 0 ? values
-                .Select(x => new Prediction { Tag = x.Item1, ConfidenceLevel = getConfidence((x.Item2 - avg) / sd), Score = (x.Item2 - avg) / sd })
-                .Where(x => x.ConfidenceLevel == PredictionConfidence.High || x.ConfidenceLevel == PredictionConfidence.Medium)
+                .Select(x => new Prediction { 
+                    Tag = x.Item1, 
+                    ConfidenceLevel = getConfidence((x.Item2 - avg) / sd), 
+                    Score = (x.Item2 - avg) / sd, 
+                    Probability = Math.Sqrt(Math.Exp(x.Item2)) / sumProbs, 
+                    Features = featuresCount })
                 .Take(top)
                 .ToList()
                 :
                 // when no variance exists, we are a bit in a dilemma. It might be a few categories that precisely describes the test voucher, or, just a garbage result.
-                (values.Count() <= top) ? values.Select(x => new Prediction { Tag = x.Item1, ConfidenceLevel = PredictionConfidence.Medium, Score = x.Item2 }).Take(top).ToList() : new List<Prediction>();
+                (values.Count() <= top) ? values.Select(x => new Prediction { 
+                    Tag = x.Item1, 
+                    ConfidenceLevel = PredictionConfidence.Medium, 
+                    Score = x.Item2, 
+                    Probability = Math.Sqrt(Math.Exp(x.Item2)) / sumProbs, 
+                    Features = featuresCount }).Take(top).ToList() 
+                    : new List<Prediction>();
         }
 
         /// <summary>
@@ -250,7 +263,7 @@ namespace WindowsFormsApplication1
         {
             if (TrainingData != null)
             {
-                var voucherDict = TrainingData.GroupBy(x=>x.Voucher.Id).ToDictionary(x => x.Key, x=>0);
+                var voucherDict = TrainingData.GroupBy(x => x.Voucher.Id).ToDictionary(x => x.Key, x => 0);
                 TrainingData.AddRange(_ftm.ReadVouchersFeatures(vouchers.Where(x => !voucherDict.ContainsKey(x.Id))));
             }
             else
