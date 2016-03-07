@@ -1,0 +1,47 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace WindowsFormsApplication1
+{
+    /// <summary>
+    /// Tag prediction confidence level
+    /// </summary>
+    public enum PredictionConfidence
+    {
+        High,
+        Medium,
+        Low
+    }
+
+    public class Prediction
+    {
+        /// <summary>
+        /// Predicted tag name
+        /// </summary>
+        public string Tag { get; set; }
+
+        /// <summary>
+        /// Confidence level
+        /// </summary>
+        public PredictionConfidence ConfidenceLevel { get; set; }
+
+        /// <summary>
+        /// Z-Score of NB log likellihood
+        /// </summary>
+        public double Score { get; set; }
+
+        /// <summary>
+        /// Pseudo probability
+        /// </summary>
+        public double Probability { get; set; }
+
+        /// <summary>
+        /// Number of features extracted from text voucher OCR data
+        /// </summary>
+        public int Features { get; set; }
+    }
+
+}
