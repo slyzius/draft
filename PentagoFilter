@@ -1,0 +1,180 @@
+using System;
+using MathNet.Numerics.LinearAlgebra;
+using MathNet.Numerics.LinearAlgebra.Storage;
+using System.Collections.Generic;
+using System.Linq;
+
+public class Filter
+{
+    Matrix<double> horz2 = Matrix<double>.Build.DenseOfRowMajor(1, 2, new double[] {1.0, 1.0});
+    Matrix<double> horz3 = Matrix<double>.Build.DenseOfRowMajor(1, 3, new double[] {1.0, 1.0, 1.0});
+    Matrix<double> horz4 = Matrix<double>.Build.DenseOfRowMajor(1, 4, new double[] {1.0, 1.0, 1.0, 1.0});
+    Matrix<double> horz5 = Matrix<double>.Build.DenseOfRowMajor(1, 5, new double[] { 1.0, 1.0, 1.0, 1.0, 1.0 });
+
+    Matrix<double> vert2 = Matrix<double>.Build.DenseOfRowMajor(2, 1, new double[] {1.0, 1.0});
+    Matrix<double> vert3 = Matrix<double>.Build.DenseOfRowMajor(3, 1, new double[] {1.0, 1.0, 1.0});
+    Matrix<double> vert4 = Matrix<double>.Build.DenseOfRowMajor(4, 1, new double[] {1.0, 1.0, 1.0, 1.0});
+    Matrix<double> vert5 = Matrix<double>.Build.DenseOfRowMajor(5, 1, new double[] { 1.0, 1.0, 1.0, 1.0, 1.0 });
+
+    Matrix<double> ldiag2 = Matrix<double>.Build.DenseOfRowMajor(2, 2, new double[] { 
+            1.0, 0.0, 
+            0.0, 1.0});
+    Matrix<double> ldiag3 = Matrix<double>.Build.DenseOfRowMajor(3, 3, new double[] { 
+            1.0, 0.0, 0.0, 
+            0.0, 1.0, 0.0,
+            0.0, 0.0, 1.0});
+
+    Matrix<double> ldiag4 = Matrix<double>.Build.DenseOfRowMajor(4, 4, new double[] { 
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0});
+
+    Matrix<double> ldiag5 = Matrix<double>.Build.DenseOfRowMajor(5, 5, new double[] {
+            1.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 0.0, 1.0 });
+
+    Matrix<double> rdiag2 = Matrix<double>.Build.DenseOfRowMajor(2, 2, new double[] { 
+            .0, 1.0, 
+            1.0, .0});
+    Matrix<double> rdiag3 = Matrix<double>.Build.DenseOfRowMajor(3, 3, new double[] { 
+            .0, 0.0, 1.0, 
+            0.0, 1.0, 0.0,
+            1.0, 0.0, 0.0});
+
+    Matrix<double> rdiag4 = Matrix<double>.Build.DenseOfRowMajor(4, 4, new double[] { 
+            0.0, 0.0, 0.0, 1.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            1.0, 0.0, 0.0, 0.0});
+
+    Matrix<double> rdiag5 = Matrix<double>.Build.DenseOfRowMajor(5, 5, new double[] {
+            0.0, 0.0, 0.0, 0.0, 1.0,
+            0.0, 0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 1.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0, 0.0,
+            1.0, 0.0, 0.0, 0.0, 0.0 });
+
+    public bool IsWinner(Matrix<double> space)
+    {
+        double[] output = new double[18];
+
+        Conv(space, horz5, 5, output, 0);
+        if (output.Any(x => x == 1))
+        {
+            return true;
+        }
+
+        Conv(space, vert5, 5, output, 0);
+        if (output.Any(x => x == 1))
+        {
+            return true;
+        }
+
+        Conv(space, ldiag5, 5, output, 0);
+        if (output.Any(x => x == 1))
+        {
+            return true;
+        }
+
+        Conv(space, rdiag5, 5, output, 0);
+        if (output.Any(x => x == 1))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+
+
+    public IEnumerable<double> CreateSpatialInput(Matrix<double> space)
+    {
+        double[] output = new double[276];
+        int ioutput = 0;
+
+        ioutput = Conv(space, horz2, 2, output, ioutput);
+        ioutput = Conv(space, horz3, 3, output, ioutput);
+        ioutput = Conv(space, horz4, 4, output, ioutput);
+        ioutput = Conv(space, horz5, 5, output, ioutput);
+
+        ioutput = Conv(space, vert2, 2, output, ioutput);
+        ioutput = Conv(space, vert3, 3, output, ioutput);
+        ioutput = Conv(space, vert4, 4, output, ioutput);
+        ioutput = Conv(space, vert5, 5, output, ioutput);
+
+        ioutput = Conv(space, ldiag2, 2, output, ioutput);
+        ioutput = Conv(space, ldiag3, 3, output, ioutput);
+        ioutput = Conv(space, ldiag4, 4, output, ioutput);
+        ioutput = Conv(space, ldiag5, 5, output, ioutput);
+
+        ioutput = Conv(space, rdiag2, 2, output, ioutput);
+        ioutput = Conv(space, rdiag3, 3, output, ioutput);
+        ioutput = Conv(space, rdiag4, 4, output, ioutput);
+        ioutput = Conv(space, rdiag5, 5, output, ioutput);
+
+        return output.Concat(space.ToColumnMajorArray());
+
+       /* var h2 = Conv(space, horz2, 2, output, ioutput);
+        var h3 = Conv(space, horz3, 3);
+        var h4 = Conv(space, horz4, 4);
+
+        var v2 = Conv(space, vert2, 2);
+        var v3 = Conv(space, vert3, 3);
+        var v4 = Conv(space, vert4, 4);
+
+        var ld2 = Conv(space, ldiag2, 2);
+        var ld3 = Conv(space, ldiag3, 3);
+        var ld4 = Conv(space, ldiag4, 4);
+
+        var rd2 = Conv(space, rdiag2, 2);
+        var rd3 = Conv(space, rdiag3, 3);
+        var rd4 = Conv(space, rdiag4, 4);
+
+        return 
+            h2
+            .Concat(h3)
+            .Concat(h4)
+            .Concat(v2)
+            .Concat(v3)
+            .Concat(v4)
+            .Concat(ld2)
+            .Concat(ld3)
+            .Concat(ld4)
+            .Concat(rd2)
+            .Concat(rd3)
+            .Concat(rd4)
+            .Concat(space.ToColumnMajorArray());*/
+    }
+
+    int Conv(Matrix<double> input, Matrix<double> filter, int filterMask, double[] output, int ioutput)
+    {
+        var iRowCount = input.RowCount;
+        var fRowCount = filter.RowCount;
+
+        var iColumnCount = input.ColumnCount;
+        var fColumnCount = filter.ColumnCount;
+
+        for (int startRow = 0; startRow <= iRowCount - fRowCount; startRow++)
+        {
+            for (int startCol = 0; startCol <= iColumnCount - fColumnCount; startCol++)
+            {
+                double matches = 0;
+
+                for (int row = startRow; row < startRow + fRowCount; row++)
+                {
+                    for (int col = startCol; col < startCol + fColumnCount; col++)
+                    {
+                        matches += input[row, col] * filter[(row - startRow), (col - startCol)];
+                    }
+                }
+                output[ioutput++] = (int)matches / filterMask;
+            }
+        }
+
+        return ioutput;
+    }
+}
