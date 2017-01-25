@@ -1,0 +1,625 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.Linq;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using MathNet.Numerics.Data.Text;
+using MathNet.Numerics.LinearAlgebra;
+
+using MathNet.Numerics.Providers.LinearAlgebra.Cuda;
+using System.Numerics;
+using MathNet.Numerics.LinearAlgebra.Storage;
+using MathNet.Numerics;
+using MathNet.Numerics.Providers.LinearAlgebra.Mkl;
+
+namespace Pentago
+{
+    public class NeuralNet
+    {
+        public List<Tuple<int, int>> _layers;
+        double _learningRate = 0.001;
+        double _momentumRate = 0;//0.001;//0.001;
+        double _regularizationL2 = 0;//0.01;
+        double _regularizationL1 = 0;//0.01;
+        public bool _testDerrivative = false;
+        public Matrix<double>[] _wHidden;
+        public Vector<double>[] _wHiddenBias;
+        public Matrix<double>[] _dwHidden;
+        public Vector<double>[] _dwHiddenBias;
+        public Vector<double> _lastLayerDerr;
+        Random _rand = new Random();
+
+        Filter _filter = new Filter();
+
+        public NeuralNet()
+        {
+            Control.LinearAlgebraProvider = new MklLinearAlgebraProvider();
+            Initialize();
+        }
+
+        void Initialize()
+        {
+            //_layers = new List<Tuple<int, int>> { /*new Tuple<int, int>(80, 648)*/ new Tuple<int, int>(350, 72), new Tuple<int, int>(120, 350), new Tuple<int, int>(1, 120) };
+            //_layers = new List<Tuple<int, int>> { new Tuple<int, int>(80, 184), new Tuple<int, int>(80, 80), new Tuple<int, int>(128, 80)};
+
+            _layers = new List<Tuple<int, int>> { new Tuple<int, int>(80, 624), new Tuple<int, int>(40, 80), new Tuple<int, int>(288, 40) };
+
+            //_layers = new List<Tuple<int, int>> { new Tuple<int, int>(288, 72), new Tuple<int, int>(288, 288), new Tuple<int, int>(288, 288) };
+
+            // sigmoid
+            // double randLimit = 1.0;
+            // double r = 4.0 * Math.Sqrt(6.0 / (_layers[0].Item2 + _layers[_layers.Count - 1].Item1));
+            // wHidden = hidden.Select(x => Matrix<double>.Build.Dense(x.Item1, x.Item2, Enumerable.Repeat<double>(0.0, x.Item1 * x.Item2).Select(z => (rand.NextDouble() * 2 - 1) * r).ToArray())).ToArray();
+            // wHiddenBias = hidden.Select(x => Vector<double>.Build.Dense(Enumerable.Repeat<double>(0.0, x.Item1).Select(z => (rand.NextDouble() * 2 - 1) * r).ToArray())).ToArray();
+
+            // tanh
+            Func<double, double, double> Normal = (mean, stdDev) =>
+            {
+                double u1 = _rand.NextDouble(); //these are uniform(0,1) random doubles
+                double u2 = _rand.NextDouble();
+                double randStdNormal = Math.Sqrt(-2.0 * Math.Log(u1)) *
+                            Math.Sin(2.0 * Math.PI * u2); //random normal(0,1)
+                double randNormal =
+                            mean + stdDev * randStdNormal; //random normal(mean,stdDev^2)
+
+                return randNormal;
+            };
+
+            _wHidden = _layers.Select(x => Matrix<double>.Build.Dense(x.Item1, x.Item2, Enumerable.Repeat<double>(0.0, x.Item1 * x.Item2)
+                .Select(z =>
+                {
+                    var q = 1 / Math.Sqrt(x.Item2);
+                    return Normal(0, q);
+
+                }).ToArray())).ToArray();
+
+
+            _wHiddenBias = _layers.Select(x => Vector<double>.Build.Dense(Enumerable.Repeat<double>(0.0, x.Item1)
+                .Select(z =>
+                {
+                    var q = 1 / Math.Sqrt(x.Item2);
+                    return Normal(0, q);
+                }).ToArray())).ToArray();
+
+
+            _wHidden[_layers.Count - 1] = Matrix<double>.Build.Dense(_layers.Last().Item1, _layers.Last().Item2,
+                Enumerable.Repeat<double>(0.0, _layers.Last().Item1 * _layers.Last().Item2).Select(z => _rand.NextDouble() / _layers.Last().Item1).ToArray());
+
+            _wHiddenBias[_layers.Count - 1] = Vector<double>.Build.Dense(Enumerable.Repeat<double>(0.0, _layers.Last().Item1).Select(z => _rand.NextDouble() / _layers.Last().Item1).ToArray());
+            _lastLayerDerr = Vector<double>.Build.Dense(Enumerable.Repeat<double>(1.0, _layers[_layers.Count - 1].Item1).ToArray());
+
+            _dwHidden = _wHidden.Select(x => Matrix<double>.Build.Dense(x.RowCount, x.ColumnCount, 0.0)).ToArray();
+            _dwHiddenBias = _wHiddenBias.Select(x => Vector<double>.Build.Dense(x.Count, 0.0)).ToArray();
+
+            //TestDerrivatives();
+        }
+
+        #region activation func
+        Vector<double> sigmoid(Vector<double> input, int layer)
+        {
+            if (layer == _wHidden.Length - 1)
+            {
+                return input;
+            }
+            else
+            {
+                //return Vector<double>.Build.DenseOfArray(input.Select(x=> 1.0 /(1.0+Math.Exp(-x))).ToArray()); // sigmoid
+                //return Vector<double>.Build.DenseOfArray(input.Select(x => Math.Max(0, x)).ToArray()); // reLu
+
+                return Vector<double>.Build.DenseOfArray(input.Select(x => 1.7159 * Math.Tanh(x * 2.0 / 3.0)).ToArray()); // tanh
+                //return (input * (2.0 / 3.0)).PointwiseTanh() * 1.7159;
+
+                //return Vector<double>.Build.DenseOfArray(input.Select(x =>Math.Tanh(x)).ToArray()); // tanh
+            }
+        }
+
+        Vector<double> derrivative(Vector<double> x, int layer)
+        {
+            if (layer == _wHidden.Length)
+            {
+                return _lastLayerDerr;
+            }
+            else
+            {
+                //return x.PointwiseMultiply((1.0 - x)); //sigmoid
+                //return Vector<double>.Build.DenseOfArray(x.Select(z => (z > 0) ? 1 : 0.00000 * z).ToArray()); // reLu
+
+                return Vector<double>.Build.DenseOfArray(x.Select(z => (1.7159 - z * z / 1.7159) * 2.0 / 3.0 ).ToArray()); // tanh
+                //return Vector<double>.Build.DenseOfArray(x.Select(z => (1- z * z) ).ToArray()); // tanh
+            }
+        }
+
+        #endregion
+
+        #region batch learning
+
+        IEnumerable<KeyValuePair<QSpace, Dictionary<int, ActionMove>>> RandomValues(IDictionary<QSpace, Dictionary<int, ActionMove>> qSpaces, Random rand)
+        {
+            List<KeyValuePair < QSpace, Dictionary<int, ActionMove>>> values = Enumerable.ToList(qSpaces);
+            int size = qSpaces.Count;
+            while (true)
+            {
+                yield return values[rand.Next(size)];
+            }
+        }
+
+        IEnumerable<List<KeyValuePair<QSpace, Dictionary<int, ActionMove>>>> RandomLists(IEnumerable<KeyValuePair<QSpace, Dictionary<int, ActionMove>>> values, int miniBatchSize, int degreeOfParallelism)
+        {
+            for(int i = 0; i < degreeOfParallelism; i++)
+            {
+                yield return values.Take(miniBatchSize / degreeOfParallelism).ToList();
+            }
+        }
+
+        public double BatchUpdate(Dictionary<QSpace,Dictionary<int,ActionMove>> qSpaces, int miniBatchSize = 64)
+        {
+            if(qSpaces.Count == 0)
+            {
+                return 0.0;
+            }
+
+            int mxDegreeOfParallelism = 4;
+            var rand = new ThreadLocal<Random>(() => new Random(Guid.NewGuid().GetHashCode())).Value;
+
+
+            double e = 0.0;
+            var wHiddenDelta = _layers.Select(x => Matrix<double>.Build.Dense(x.Item1, x.Item2, 0.0)).ToArray();
+            var wHiddenDeltaBias = _layers.Select(x => Vector<double>.Build.Dense(x.Item1, 0)).ToArray();
+
+            object sync = new object();
+
+            Parallel.ForEach<List<KeyValuePair<QSpace, Dictionary<int, ActionMove>>>>(RandomLists(RandomValues(qSpaces,rand), miniBatchSize, mxDegreeOfParallelism), // source collection
+                            new ParallelOptions { MaxDegreeOfParallelism = mxDegreeOfParallelism },
+
+                            (qSpaceList) => // method invoked by the loop on each iteration
+                            {
+                                double el = 0.0;
+                                var wHiddenDeltaLocal = wHiddenDelta.ToArray();
+                                var wHiddenDeltaBiasLocal = wHiddenDeltaBias.ToArray();
+
+                                foreach (var qSpace in qSpaceList)
+                                {
+                                    var input = MakeInputVector(qSpace.Key);
+                                    var outputs = MakeOutputs(input);
+
+                                    Vector<double> target = outputs.Last().Clone();
+                                    foreach (var value in qSpace.Value.Values)
+                                    {
+                                        target[value.Id] = value.Value;
+                                    }
+
+                                    var error = outputs.Last() - target;
+
+                                    el += Math.Pow(error.L2Norm(), 2.0);
+
+                                    // back propagation: derrivatives * error
+                                    Matrix<double> w = null;
+                                    for (int iLayer = _layers.Count - 1; iLayer >= 0; iLayer--)
+                                    {
+                                        Matrix<double> dWeigths = MakeLayerDerrivatives(w, iLayer, outputs, error);
+                                        wHiddenDeltaBiasLocal[iLayer] += dWeigths.Column(dWeigths.ColumnCount - 1);
+                                        wHiddenDeltaLocal[iLayer] += dWeigths.RemoveColumn(dWeigths.ColumnCount - 1);
+
+                                        var dD = derrivative(outputs[iLayer + 1], iLayer + 1);
+                                        var ww = _wHidden[iLayer].PointwiseMultiply(Matrix<double>.Build.DenseOfColumnVectors(Enumerable.Repeat<Vector<double>>(dD, _layers[iLayer].Item2)));
+                                        w = (w == null) ? ww : w * ww;
+                                    }
+                                }
+
+                                lock (sync)
+                                {
+                                    e += el;
+
+                                    for (int i = 0; i < _layers.Count; i++)
+                                    {
+                                        wHiddenDelta[i] += wHiddenDeltaLocal[i];
+                                        wHiddenDeltaBias[i] += wHiddenDeltaBiasLocal[i];
+                                    }
+                                }
+                            });
+                
+
+            // update network weights
+            for (int i = 0; i < _layers.Count; i++)
+            {
+                _dwHidden[i] = _momentumRate * _dwHidden[i] - _learningRate * wHiddenDelta[i] / miniBatchSize;
+                _dwHiddenBias[i] = _momentumRate * _dwHiddenBias[i] - _learningRate * wHiddenDeltaBias[i] / miniBatchSize;
+                _wHidden[i] += _dwHidden[i];
+                _wHiddenBias[i] += _dwHiddenBias[i];
+            }
+
+            return Math.Sqrt(e / miniBatchSize);
+        }
+
+        public Vector<double> Predict(QSpace qSpace)
+        {
+            var input = MakeInputVector(qSpace);
+            var output = MakeLastOutput(input);
+            return output;
+        }
+
+        #endregion
+
+        #region serialization
+
+        public void Write(TextWriter writer)
+        {
+            writer.WriteLine(_layers.Count);
+            for(int i = 0; i < _layers.Count; i++)
+            {
+                writer.WriteLine(_layers[i].Item1);
+                writer.WriteLine(_layers[i].Item2);
+
+                WriteMatrix(writer, _wHidden[i], _layers[i].Item1, _layers[i].Item2);
+                WriteVector(writer, _wHiddenBias[i]);
+            }
+            WriteVector(writer, _lastLayerDerr);
+        }
+
+        void WriteMatrix(TextWriter writer, Matrix<double> matrix, int rows, int cols)
+        {
+            var dense = matrix.Storage as DenseColumnMajorMatrixStorage<double>;
+            if (dense != null)
+            {
+                foreach (var value in dense.Data)
+                {
+                    writer.WriteLine(value);
+                }
+            }
+        }
+
+        void WriteVector(TextWriter writer, Vector<double> vector)
+        {
+            var dense = vector.Storage as DenseVectorStorage<double>;
+            if (dense != null)
+            {
+                foreach (var value in dense.Data)
+                {
+                    writer.WriteLine(value);
+                }
+            }
+        }
+
+
+        IEnumerable<double> ColumnMajor(TextReader reader, int total)
+        {
+            for (int i = 0; i < total; i++)
+            {
+                var value = double.Parse(reader.ReadLine());
+                yield return value;
+            }
+        }
+
+        Matrix<double> ReadMatrix(TextReader reader, int rows, int cols)
+        {
+            return Matrix<double>.Build.DenseOfColumnMajor(rows, cols, ColumnMajor(reader, rows*cols));
+        }
+
+        Vector<double> ReadVector(TextReader reader, int rows)
+        {
+            return Vector<double>.Build.Dense(ColumnMajor(reader, rows).ToArray());
+        }
+
+        public void Load(TextReader reader)
+        {
+            _layers = new List<Tuple<int, int>>();
+            
+            int NNlayers = int.Parse(reader.ReadLine()); ;
+            _wHidden = new Matrix<double>[NNlayers];
+            _wHiddenBias = new Vector<double>[NNlayers];
+
+            for (int i = 0; i < NNlayers; i++)
+            {
+                int rows = int.Parse(reader.ReadLine());
+                int cols = int.Parse(reader.ReadLine());
+                _layers.Add(new Tuple<int, int>(rows,cols));
+
+                _wHidden[i] = ReadMatrix(reader, rows, cols);
+                _wHiddenBias[i] = ReadVector(reader, rows);
+            }
+            _lastLayerDerr = ReadVector(reader, _layers.Last().Item1);
+        }
+
+        #endregion
+
+        #region Network
+
+        public Tuple<float, float> GetReward(QSpace qSpace)
+        {
+            float r1 = 0, r2 = 0;
+            //return new Tuple<float, float>(0, 0);
+
+            Matrix<double> spaceMe = Matrix<double>.Build.Dense(6, 6);
+            Matrix<double> spaceOp = Matrix<double>.Build.Dense(6, 6);
+            for (int i = 0; i < 36; i++)
+            {
+                spaceMe[i / 6, i % 6] = qSpace.IsMe(i) ? 1.0 : 0;
+                spaceOp[i / 6, i % 6] = qSpace.IsOpponent(i) ? 1.0 : 0;
+            }
+
+            var meWinner = _filter.IsWinner(spaceMe);
+            var opWinner = _filter.IsWinner(spaceOp);
+
+            if (meWinner)
+            {
+                r1 = 100;
+            }
+
+            if (opWinner)
+            {
+                r2 = 100;
+            }
+
+            if (r1 > 0 || r2 > 0)
+            {
+                if (r1 == r2)
+                {
+                    return new Tuple<float, float>((float)50, (float)50); // tie
+                }
+                else
+                {
+                    return new Tuple<float, float>(r1 - r2, /*r2-r1*/0);
+                }
+            }
+
+            return new Tuple<float, float>(0, 0);
+        }
+
+        public Dictionary<QSpace, Vector<double>> _inputCache = new Dictionary<QSpace, Vector<double>>();
+
+        public Vector<double> MakeInputVector(QSpace qSpace)
+        {
+            Vector<double> sparseInput; 
+
+            //if (!_inputCache.ContainsKey(qSpace))
+            //{
+                Matrix<double> spaceMe = Matrix<double>.Build.Dense(6, 6);
+                Matrix<double> spaceOp = Matrix<double>.Build.Dense(6, 6);
+                for (int i = 0; i < 36; i++)
+                {
+                    spaceMe[i / 6, i % 6] = qSpace.IsMe(i) ? 1.0 : 0;
+                    spaceOp[i / 6, i % 6] = qSpace.IsOpponent(i) ? 1.0 : 0;
+                }
+
+                var spatial = _filter.CreateSpatialInput(spaceMe).Concat(_filter.CreateSpatialInput(spaceOp));
+
+                sparseInput = Vector<double>.Build.DenseOfEnumerable(spatial);
+
+                //sparseInput = Vector<double>.Build.SparseOfEnumerable(spatial);
+
+                /*if (_inputCache.Count > 40000000)
+                {
+                    // make a space
+                    _inputCache.Clear();
+                    //_inputCache.Remove(_inputCache.Keys.ite..ElementAt(_rand.Next(_inputCache.Count)));
+                }*/
+
+                //_inputCache[qSpace] = sparseInput;
+            //}
+            //else
+            //{
+            //    sparseInput =  _inputCache[qSpace];
+            //}
+
+            return sparseInput;
+            //return Vector<double>.Build.DenseOfEnumerable(sparseInput);
+            
+           
+
+                /*
+            
+                        Vector <double> space = Vector<double>.Build.Dense(72);
+                        for (int i = 0; i < 36; i++)
+                        {
+                            if (qSpace.IsMe(i))
+                            {
+                                space[i * 2] = 1.0;
+                            }
+                            else if (qSpace.IsOpponent(i))
+                            {
+                                space[i * 2 + 1] = 1.0;
+                            }
+                        }
+                        return space;*/
+        }
+
+        List<Vector<double>> MakeOutputs(Vector<double> input)
+        {
+            List<Vector<double>> out_net = new List<Vector<double>> { input };
+            for (int h = 0; h < _wHidden.Length; h++)
+            {
+                var tnet_h = _wHidden[h] * out_net[h] + _wHiddenBias[h];
+                out_net.Add(sigmoid(tnet_h, h));
+            }
+            return out_net;
+        }
+
+        Vector<double> MakeLastOutput(Vector<double> input)
+        {
+            Vector<double> out_net = input;
+
+            for (int h = 0; h < _wHidden.Length; h++)
+            {
+                var tnet_h = _wHidden[h] * out_net + _wHiddenBias[h];
+                out_net = sigmoid(tnet_h, h);
+            }
+            return out_net;
+        }
+
+        Matrix<double> MakeLayerDerrivatives(Matrix<double> w, int layer, List<Vector<double>> outputs, Vector<double> error)
+        {
+            if (_testDerrivative)
+            {
+                int bpLayer1 = outputs.Count - 2;
+
+                Matrix<double> w1 = null;
+                for (; bpLayer1 > layer; bpLayer1--)
+                {
+                    var dD = derrivative(outputs[bpLayer1 + 1], bpLayer1 + 1);
+                    var ww = _wHidden[bpLayer1].PointwiseMultiply(Matrix<double>.Build.DenseOfColumnVectors(Enumerable.Repeat<Vector<double>>(dD, _layers[bpLayer1].Item2)));
+                    w1 = (w1 == null) ? ww : w1 * ww;
+                }
+
+                if (layer != bpLayer1)
+                {
+                    throw new Exception("sss");
+                }
+
+                if (w != null)
+                {
+                    var wNorm = w.L2Norm();
+                    var wNorm1 = w1.L2Norm();
+
+                    if (wNorm != wNorm1)
+                    {
+                        throw new Exception("sss");
+                    }
+                }
+            }
+
+            // this is the layer we take a derrivative
+            Matrix<double> ret = Matrix<double>.Build.Dense(_layers[layer].Item1, _layers[layer].Item2 + 1);
+            var d1 = derrivative(outputs[layer + 1], layer + 1);
+            var o1 = Vector<double>.Build.Dense(_layers[layer].Item1, 0.0);
+
+            for (int row = 0; row < _layers[layer].Item1; ++row)
+            {
+                o1[row] = 1.0;
+                var derrL = ((w != null) ? (w.Column(row) * error) : o1 * error);
+                var d1Row = d1[row];
+                var outputLayer = outputs[layer];
+
+                for (int col = 0; col < _layers[layer].Item2; ++col)
+                {
+                    var do1 = d1Row * outputLayer[col];
+                    //var derrOriginal = ((w != null) ? (w * o1) : o1) * error;
+                    var derr = derrL * do1;
+
+                    ret[row, col] = derr;
+
+                    if (_testDerrivative)
+                    {
+                        var derrTestV = MakeNumericDerrivative(layer, row, col, false, outputs);
+                        var derrTestW = derrTestV * error;
+                        if (Math.Abs(derr - derrTestW) > 0.001)
+                        {
+                            throw new Exception("sss");
+                        }
+                    }
+                }
+
+                o1[row] = 0.0;
+            }
+
+            // and bias
+            for (int row = 0; row < _layers[layer].Item1; ++row)
+            {
+                o1[row] = d1[row];
+                //var dBias = (w != null) ? (w.Row(ioutput) * o1) : o1[ioutput];
+                var dBias = ((w != null) ? (w * o1) : o1) * error;
+                ret[row, _layers[layer].Item2] = dBias;
+
+                if (_testDerrivative)
+                {
+                    var derrTestB = MakeNumericDerrivative(layer, row, 0, true, outputs) * error;
+                    if (Math.Abs(dBias - derrTestB) > 0.001)
+                    {
+                        throw new Exception("The partial derrivative does not match numeric derrivative.");
+                    }
+                }
+                o1[row] = 0.0;
+            }
+
+            return ret;
+        }
+
+        public Vector<double> MakeNumericDerrivative(int layer, int row, int col, bool bias, List<Vector<double>> outputs)
+        {
+            // numeric derrivative
+            if (!bias)
+            {
+                double origin = _wHidden[layer][row, col];
+                double alpha = 0.00000001;
+                _wHidden[layer][row, col] = origin + alpha;
+                var d1 = MakeOutputs(outputs[0]);
+                _wHidden[layer][row, col] = origin - alpha;
+                var d2 = MakeOutputs(outputs[0]);
+                var derr = (d1.Last() - d2.Last()) / (2 * alpha);
+
+                // restore weight
+                _wHidden[layer][row, col] = origin;
+                return derr;
+            }
+            else
+            {
+                double origin = _wHiddenBias[layer][row];
+                double alpha = 0.00000001;
+                _wHiddenBias[layer][row] = origin + alpha;
+                var d1 = MakeOutputs(outputs[0]);
+                _wHiddenBias[layer][row] = origin - alpha;
+                var d2 = MakeOutputs(outputs[0]);
+                var derr = (d1.Last() - d2.Last()) / (2 * alpha);
+
+                // restore weight
+                _wHiddenBias[layer][row] = origin;
+                return derr;
+
+            }
+        }
+
+        List<Vector<double>> Predict(Vector<double> input)
+        {
+            return MakeOutputs(input);
+        }
+
+        #endregion
+
+            #region Test
+        public void TestDerrivatives()
+        {
+
+            //testDerrivative = true;
+
+            /*double r = 1.0;
+            Random rand = new Random(123);
+            var inputs = Vector<double>.Build.Dense(Enumerable.Repeat<double>(0.0, _layers[0].Item2).Select(z => ( (rand.NextDouble() > 0.5) ? 1.0 : 0)).ToArray());
+            var targets = Vector<double>.Build.Dense(Enumerable.Repeat<double>(0.0, _layers[_layers.Count-1].Item1).Select(z => rand.NextDouble()).ToArray());
+
+            int i = 0;
+            while (true)
+            {
+                List<Vector<double>> outputs = MakeOutputs(inputs);
+                Vector<double> p = outputs.Last();
+                var err = p - targets;
+
+                int ioputput = (int)((double)targets.Count * rand.NextDouble());
+
+                Learn(err[ioputput], ioputput, outputs);
+                if (i % 100 == 0)
+                {
+                    Debug.WriteLine(string.Format("{0}:{1}", i, err.Select(x=> x*x).Sum()));
+                }
+                i++;
+            }*/
+
+            //testDerrivative = false;
+        }
+
+        void Learn(double error, int ioutput, List<Vector<double>> outputs)
+        {
+            /*var weights = LearnDelta(error, ioutput, outputs);
+            for (int i = 0; i < _layers.Count; i++)
+            {
+                _wHidden[i] -= weights.Item1[i];
+                _wHiddenBias[i] -= weights.Item2[i];
+            }*/
+        }
+
+        #endregion
+
+
+    }
+}
