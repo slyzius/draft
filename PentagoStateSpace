@@ -1,0 +1,563 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Pentago
+{
+    /// <summary>
+    /// 2x2
+    /// </summary>
+    /*public class QSpace
+    {
+        public uint _me = 0;
+        public uint _op = 0;
+
+        static List<int> superCells = new List<int> { 0, 2, 8, 10 };
+
+        #region Equal
+
+        public static bool operator ==(QSpace lh, QSpace rh)
+        {
+            if (ReferenceEquals(null, lh))
+            {
+                return false;
+            }
+
+            return lh.Equals(rh);
+        }
+
+        public static bool operator !=(QSpace lh, QSpace rh)
+        {
+            return !Equals(lh, rh);
+        }
+
+        public override bool Equals(object obj)
+        {
+            var other = obj as QSpace;
+            return _me == other._me && _op == other._op;
+        }
+
+        public override int GetHashCode()
+        {
+            int hashedValue = (int)(_me * (UInt64)Math.Pow(31, 1) + _op * (UInt64)Math.Pow(31, 2));
+            return hashedValue;
+        }
+
+        #endregion
+
+        public void Write(TextWriter writer)
+        {
+            writer.WriteLine(_me);
+            writer.WriteLine(_op);
+        }
+
+        public static QSpace Load(TextReader reader)
+        {
+            var me = uint.Parse(reader.ReadLine());
+            var op = uint.Parse(reader.ReadLine());
+            return new QSpace { _me = me, _op = op };
+        }
+
+        public bool IsFree(int position)
+        {
+            uint one = 1;
+            uint state = one << position;
+
+            return (_me & state) == 0 && (_op & state) == 0;
+        }
+
+        public bool IsMe(int position)
+        {
+            uint one = 1;
+            uint state = one << position;
+
+            return (_me & state) != 0;
+        }
+
+        public bool IsOpponent(int position)
+        {
+            uint one = 1;
+            uint state = one << position;
+
+            return (_op & state) != 0;
+        }
+
+        public bool IsFullBoard()
+        {
+            return (_me | _op) == 0x0000ffff;
+        }
+
+        public void ResetState()
+        {
+            _me = 0;
+            _op = 0;
+        }
+
+        public QSpace Clone()
+        {
+            return new QSpace { _me = _me, _op = _op };
+        }
+
+        public QSpace Inverse()
+        {
+            return new QSpace { _me = _op, _op = _me };
+        }
+
+        public void TakeAction(ActionMove action)
+        {
+            TakeMoveAction(action.PositionsId);
+            TakeRotateAction(action.Rotation);
+        }
+
+        public void TakeMoveAction(int position)
+        {
+            uint one = 1;
+            uint state = one << position;
+
+            if ((_me & state) > 0 || (_op & state) > 0)
+            {
+                throw new Exception("Incorrect move");
+            }
+
+            _me |= state;
+
+            if ((_me & _op) > 0)
+            {
+                throw new Exception("Incorrect move");
+            }
+        }
+
+        public void TakeOpponentMoveAction(int position)
+        {
+            uint one = 1;
+            uint state = one << position;
+
+            if ((_me & state) > 0 || (_op & state) > 0)
+            {
+                throw new Exception("Incorrect move");
+            }
+
+            _op |= state;
+
+            if ((_me & _op) > 0)
+            {
+                throw new Exception("Incorrect move");
+            }
+        }
+
+        public void TakeRotateAction(int rotate)
+        {
+            if (rotate % 2 == 1)
+            {
+                RotateLeft((rotate - 1) / 2);
+            }
+            else
+            {
+                RotateRight((rotate - 1) / 2);
+            }
+
+            if ((_me & _op) > 0)
+            {
+                throw new Exception("Incorrect move");
+            }
+        }
+
+        public uint this[int index]
+        {
+            get
+            {
+                const uint one = 1;
+                uint state = one << index;
+                return state;
+            }
+        }
+        void RotateLeft(int square)
+        {
+            int x1 = superCells[square];
+            int x2 = x1 + 1;
+            int x3 = x1 + 4;
+            int x4 = x1 + 5;
+
+            // x2->x1, x1->x3, x3->x4, x4->x2
+            var m1 = _me & this[x1];
+            var o1 = _op & this[x1];
+            var m2 = _me & this[x2];
+            var o2 = _op & this[x2];
+            var m3 = _me & this[x3];
+            var o3 = _op & this[x3];
+            var m4 = _me & this[x4];
+            var o4 = _op & this[x4];
+
+            //  x2->x1
+            _me ^= m1;
+            _op ^= o1;
+            _me |= m2 >> 1;
+            _op |= o2 >> 1;
+
+            // x1->x3
+            _me ^= m3;
+            _op ^= o3;
+            _me |= m1 << 4;
+            _op |= o1 << 4;
+
+            // x3->x4
+            _me ^= m4;
+            _op ^= o4;
+            _me |= m3 << 1;
+            _op |= o3 << 1;
+
+            //x4->x2
+            _me ^= m2;
+            _op ^= o2;
+            _me |= m4 >> 4;
+            _op |= o4 >> 4;
+        }
+
+        void RotateRight(int square)
+        {
+            int x1 = superCells[square];
+            int x2 = x1 + 1;
+            int x3 = x1 + 4;
+            int x4 = x1 + 5;
+
+            // x1->x2, x2->x4, x4->x3, x3->x1
+            var m1 = _me & this[x1];
+            var o1 = _op & this[x1];
+            var m2 = _me & this[x2];
+            var o2 = _op & this[x2];
+            var m3 = _me & this[x3];
+            var o3 = _op & this[x3];
+            var m4 = _me & this[x4];
+            var o4 = _op & this[x4];
+
+            //  x1->x2
+            _me ^= m2;
+            _op ^= o2;
+            _me |= m1 << 1;
+            _op |= o1 << 1;
+
+            // x2->x4
+            _me ^= m4;
+            _op ^= o4;
+            _me |= m2 << 4;
+            _op |= o2 << 4;
+
+            // x4->x3
+            _me ^= m3;
+            _op ^= o3;
+            _me |= m4 >> 1;
+            _op |= o4 >> 1;
+
+            // x3->x1
+            _me ^= m1;
+            _op ^= o1;
+            _me |= m3 >> 4;
+            _op |= o3 >> 4;
+        }
+
+
+    } */
+
+    /// <summary>
+    /// 6x6
+    /// </summary>
+    public class QSpace
+    {
+        public UInt64 _me = 0;
+        public UInt64 _op = 0;
+
+        static List<int> superCells = new List<int> { 0, 3, 18, 21 };
+
+        #region Equal
+
+        public static bool operator ==(QSpace lh, QSpace rh)
+        {
+            if (ReferenceEquals(null, lh))
+            {
+                return false;
+            }
+
+            return lh.Equals(rh);
+        }
+
+        public static bool operator !=(QSpace lh, QSpace rh)
+        {
+            return !Equals(lh, rh);
+        }
+
+        public override bool Equals(object obj)
+        {
+            var other = obj as QSpace;
+            return _me == other._me && _op == other._op;
+        }
+
+        public override int GetHashCode()
+        {
+            int hashedValue = (int)(_me * (UInt64)Math.Pow(31, 1) + _op * (UInt64)Math.Pow(31, 2));
+            return hashedValue;
+        }
+
+        #endregion
+
+        public void Write(TextWriter writer)
+        {
+            writer.WriteLine(_me);
+            writer.WriteLine(_op);
+        }
+
+        public static QSpace Load(TextReader reader)
+        {
+            var me = uint.Parse(reader.ReadLine());
+            var op = uint.Parse(reader.ReadLine());
+            return new QSpace { _me = me, _op = op};
+        }
+
+        public bool IsFree(int position)
+        {
+            UInt64 one = 1;
+            UInt64 state = one << position;
+
+            return (_me & state) == 0 && (_op & state) == 0;
+        }
+
+        public bool IsMe(int position)
+        {
+            UInt64 one = 1;
+            UInt64 state = one << position;
+
+            return (_me & state) != 0;
+        }
+
+        public bool IsOpponent(int position)
+        {
+            UInt64 one = 1;
+            UInt64 state = one << position;
+
+            return (_op & state) != 0;
+        }
+
+        public bool IsFullBoard()
+        {
+            return (_me | _op) == 0x0000000fffffffff;
+        }
+
+        public void ResetState()
+        {
+            _me = 0;
+            _op = 0;
+        }
+
+        public QSpace Clone()
+        {
+            return new QSpace { _me = _me, _op = _op};
+        }
+
+        public QSpace Inverse()
+        {
+            return new QSpace { _me = _op, _op = _me};
+        }
+
+        public void TakeAction(ActionMove action)
+        {
+            TakeMoveAction(action.PositionsId);
+            TakeRotateAction(action.Rotation);
+        }
+
+        public void TakeMoveAction(int position)
+        {
+            UInt64 one = 1;
+            UInt64 state = one << position;
+
+            if ((_me & state) > 0 || (_op & state) > 0)
+            {
+                throw new Exception("Incorrect move");
+            }
+
+            _me |= state;
+
+            if ((_me & _op) > 0)
+            {
+                throw new Exception("Incorrect move");
+            }
+        }
+
+        public void TakeOpponentMoveAction(int position)
+        {
+            UInt64 one = 1;
+            UInt64 state = one << position;
+
+            if ((_me & state) > 0 || (_op & state) > 0)
+            {
+                throw new Exception("Incorrect move");
+            }
+
+            _op |= state;
+
+            if ((_me & _op) > 0)
+            {
+                throw new Exception("Incorrect move");
+            }
+        }
+
+        public void TakeRotateAction(int rotate)
+        {
+            if (rotate % 2 == 1)
+            {
+                RotateLeft((rotate - 1) / 2);
+            }
+            else
+            {
+                RotateLeft((rotate - 1) / 2);
+                RotateLeft((rotate - 1) / 2);
+                RotateLeft((rotate - 1) / 2);
+                //RotateRight((rotate - 1) / 2);
+            }
+
+            if ((_me & _op) > 0)
+            {
+                throw new Exception("Incorrect move");
+            }
+        }
+
+        public UInt64 this[int index]
+        {
+            get
+            {
+                const UInt64 one = 1;
+                UInt64 state = one << index;
+                return state;
+            }
+        }
+        void RotateLeft(int square)
+        {
+            int x1 = superCells[square];
+            int x2 = x1 + 1;
+            int x3 = x1 + 2;
+            int x4 = x1 + 6;
+            //int x5 = x4 + 1;
+            int x6 = x4 + 2;
+            int x7 = x4 + 6;
+            int x8 = x7 + 1;
+            int x9 = x7 + 2;
+
+            var m1 = _me & this[x1];
+            var o1 = _op & this[x1];
+            var m2 = _me & this[x2];
+            var o2 = _op & this[x2];
+            var m3 = _me & this[x3];
+            var o3 = _op & this[x3];
+            var m4 = _me & this[x4];
+            var o4 = _op & this[x4];
+            var m6 = _me & this[x6];
+            var o6 = _op & this[x6];
+            var m7 = _me & this[x7];
+            var o7 = _op & this[x7];
+            var m8 = _me & this[x8];
+            var o8 = _op & this[x8];
+            var m9 = _me & this[x9];
+            var o9 = _op & this[x9];
+
+            //  x1->x7
+            _me ^= m7;
+            _op ^= o7;
+            _me |= m1 << 12; 
+            _op |= o1 << 12; 
+            // x4->x8
+            _me ^= m8;
+            _op ^= o8;
+            _me |= m4 << 7; 
+            _op |= o4 << 7; 
+            // x7->x9
+            _me ^= m9;
+            _op ^= o9;
+            _me |= m7 << 2;
+            _op |= o7 << 2;
+
+            //x7->x9
+            //x8->x6
+            _me ^= m6;
+            _op ^= o6;
+            _me |= m8 >> 5; 
+            _op |= o8 >> 5;
+            //x9->x3
+            _me ^= m3;
+            _op ^= o3;
+            _me |= m9 >> 12;
+            _op |= o9 >> 12;
+
+            //x9->x3
+            //x3->x1
+            _me ^= m1;
+            _op ^= o1;
+            _me |= m3 >> 2;
+            _op |= o3 >> 2;
+            //x6->x2
+            _me ^= m2;
+            _op ^= o2;
+            _me |= m6 >> 7;
+            _op |= o6 >> 7;
+
+            //x1->x7
+            //x2->x4
+            _me ^= m4;
+            _op ^= o4;
+            _me |= m2 << 5;
+            _op |= o2 << 5;
+
+            //x3->x1
+            //_me ^= m1;
+            //_op ^= o1;
+            //_me |= m3 >> 2;
+            //_op |= o3 >> 2;
+
+        }
+
+        void RotateRight(int square)
+        {
+            int x1 = superCells[square];
+            int x2 = x1 + 1;
+            int x3 = x1 + 4;
+            int x4 = x1 + 5;
+
+            // x1->x2, x2->x4, x4->x3, x3->x1
+            var m1 = _me & this[x1];
+            var o1 = _op & this[x1];
+            var m2 = _me & this[x2];
+            var o2 = _op & this[x2];
+            var m3 = _me & this[x3];
+            var o3 = _op & this[x3];
+            var m4 = _me & this[x4];
+            var o4 = _op & this[x4];
+
+            //  x1->x2
+            _me ^= m2;
+            _op ^= o2;
+            _me |= m1 << 1;
+            _op |= o1 << 1;
+
+            // x2->x4
+            _me ^= m4;
+            _op ^= o4;
+            _me |= m2 << 4;
+            _op |= o2 << 4;
+
+            // x4->x3
+            _me ^= m3;
+            _op ^= o3;
+            _me |= m4 >> 1;
+            _op |= o4 >> 1;
+
+            // x3->x1
+            _me ^= m1;
+            _op ^= o1;
+            _me |= m3 >> 4;
+            _op |= o3 >> 4;
+        }
+
+
+    }
+
+}
