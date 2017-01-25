@@ -1,0 +1,31 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Pentago
+{
+    /*public struct ActionPosition
+    {
+        public int PositionsId { get; set; }
+        public double Value { get; set; }
+    }*/
+
+    public class ActionMove
+    {
+        public int PositionsId { get; set; }
+        public int Rotation { get; set; } // [0-7], where 1'st square(1 - left, 2 - right), 2'nd square(3 - left, 4 - right), 3'nd square(5 - left, 6 - right), 4'th square(7 - left, 8 - right)
+        public double Value { get; set; }
+
+        public int Id { get { return PositionsId * 8 + Rotation - 1; } }
+
+        //public double Value;
+    }
+
+    /*public struct ActionRotate
+    {
+        public int Rotation { get; set; } // [0-7], where 1'st square(1 - left, 2 - right), 2'nd square(3 - left, 4 - right), 3'nd square(5 - left, 6 - right), 4'th square(7 - left, 8 - right)
+        public double Value { get; set; }
+    }*/
+}
